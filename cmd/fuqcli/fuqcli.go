@@ -1,0 +1,393 @@
+package main
+
+import (
+	"encoding/json"
+	"flag"
+	"fmt"
+	"github.com/sfstewman/fuq"
+	"github.com/sfstewman/fuq/srv"
+	"os"
+	"sort"
+	"strconv"
+)
+
+type Command struct {
+	Description string
+	Run         func(fuq.Config, []string) error
+}
+
+const DefaultClientString = "fuqcli-alpha"
+
+var (
+	ClientString  string = DefaultClientString
+	sysConfigFile string
+	srvConfigFile string
+	config        fuq.Config
+	subCmds       map[string]Command
+	globalSet     *flag.FlagSet
+)
+
+func init() {
+	globalSet = flag.NewFlagSet("global", flag.ContinueOnError)
+	globalSet.StringVar(&srvConfigFile, "srv", "", "server config file")
+	globalSet.StringVar(&sysConfigFile, "cfg", "", "system config file")
+	globalSet.StringVar(&config.Foreman, "host", config.Foreman, "host of the queue foreman")
+	globalSet.IntVar(&config.Port, "port", config.Port, "port of the queue foreman")
+	globalSet.StringVar(&config.Auth, "auth", config.Auth, "authorization key of the queue foreman")
+	globalSet.StringVar(&config.KeyFile, "key", "", "path to TLS key file")
+	globalSet.StringVar(&config.CertFile, "cert", "", "path to TLS cert file")
+}
+
+func callEndpoint(cfg fuq.Config, dest string, msg, ret interface{}) error {
+	ep, err := fuq.NewEndpoint(cfg)
+	if err != nil {
+		return err
+	}
+
+	env := srv.ClientRequestEnvelope{
+		Auth: fuq.Client{Password: cfg.Auth, Client: ClientString},
+		Msg:  msg,
+	}
+
+	return ep.CallEndpoint(dest, &env, &ret)
+}
+
+func queueCmd(cfg fuq.Config, args []string) error {
+	var err error
+	job := fuq.JobDescription{
+		NumTasks: 1,
+	}
+
+	if job.WorkingDir, err = os.Getwd(); err != nil {
+		return fmt.Errorf("Error looking up working directory: %v", err)
+	}
+
+	outputJSON := false
+
+	queueFlags := flag.NewFlagSet("queue", flag.ContinueOnError)
+	queueFlags.IntVar(&job.NumTasks, "n", job.NumTasks, "number of tasks")
+	queueFlags.StringVar(&job.WorkingDir, "dir", job.WorkingDir, "working directory")
+	queueFlags.StringVar(&job.LoggingDir, "log", job.WorkingDir, "logging directory")
+	queueFlags.BoolVar(&outputJSON, "j", outputJSON, "output json")
+
+	usage := Usage{"queue", "job_name job_command", queueFlags}
+
+	if err := queueFlags.Parse(args[1:]); err != nil {
+		fmt.Fprintf(os.Stderr, "error parsing queue flags: %v", err)
+		usage.ShowAndExit()
+	}
+
+	if queueFlags.NArg() != 2 {
+		fmt.Fprintf(os.Stderr, "expected two queue arguments (found %d)\n", queueFlags.NArg())
+		usage.ShowAndExit()
+	}
+
+	qArgs := queueFlags.Args()
+	job.Name = qArgs[0]
+	job.Command = qArgs[1]
+	wd := job.WorkingDir
+	job.WorkingDir = fuq.ExpandPath(wd)
+	if job.WorkingDir == "" {
+		fmt.Fprintf(os.Stderr, "invalid working directory (%s): %v", wd, err)
+		usage.ShowAndExit()
+	}
+
+	if !outputJSON {
+		fmt.Printf("Queueing job '%s'\n", job.Name)
+		fmt.Printf("Command    : %s\n", job.Command)
+		fmt.Printf("Working dir: %s\n", job.WorkingDir)
+		fmt.Printf("Logging dir: %s\n", job.LoggingDir)
+		fmt.Printf("Num Tasks  : %d\n", job.NumTasks)
+	}
+
+	ret := fuq.NewJobResponse{}
+	if err := callEndpoint(cfg, "client/job/new", &job, &ret); err != nil {
+		return fmt.Errorf("Error encountered queuing job: %v", err)
+	}
+
+	if !outputJSON {
+		fmt.Printf("job_id     : %d\n", ret.JobId)
+	} else {
+		enc := json.NewEncoder(os.Stdout)
+		job.JobId = ret.JobId
+		if err := enc.Encode(&job); err != nil {
+			return fmt.Errorf("Error encoding job: %v", err)
+		}
+	}
+
+	return nil
+}
+
+type SortByJobId []fuq.JobDescription
+
+func (js SortByJobId) Len() int           { return len(js) }
+func (js SortByJobId) Less(i, j int) bool { return js[i].JobId < js[j].JobId }
+func (js SortByJobId) Swap(i, j int)      { js[i], js[j] = js[j], js[i] }
+
+func statusCmd(cfg fuq.Config, args []string) error {
+	req := fuq.ClientJobListReq{}
+	longListing := false
+	outputJSON := false
+
+	flags := flag.NewFlagSet("status", flag.ContinueOnError)
+	flags.StringVar(&req.Name, "name", req.Name, "job name")
+	flags.StringVar(&req.Status, "status", req.Status,
+		"job status: running, waiting, paused, or finished")
+	flags.BoolVar(&longListing, "l", longListing, "show long listing")
+	flags.BoolVar(&outputJSON, "j", outputJSON, "output json response")
+
+	usage := Usage{"status", "", flags}
+
+	if err := flags.Parse(args[1:]); err != nil {
+		fmt.Fprintf(os.Stderr, "error parsing %s flags: %v", args[0], err)
+		usage.ShowAndExit()
+	}
+
+	if flags.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "status expects no arguments (found %d)\n", flags.NArg())
+		usage.ShowAndExit()
+	}
+
+	ret := []fuq.JobDescription{}
+	if err := callEndpoint(cfg, "client/job/list", &req, &ret); err != nil {
+		return fmt.Errorf("Error encountered queuing job: %v", err)
+	}
+
+	if outputJSON {
+		enc := json.NewEncoder(os.Stdout)
+		if err := enc.Encode(&ret); err != nil {
+			return fmt.Errorf("Error encoding job: %v", err)
+		}
+		return nil
+	}
+
+	sort.Sort(SortByJobId(ret))
+
+	if longListing {
+		for _, j := range ret {
+			fmt.Printf("Job %d\n", j.JobId)
+			fmt.Printf("Name       : %s\n", j.Name)
+			fmt.Printf("Command    : %s\n", j.Command)
+			fmt.Printf("Working dir: %s\n", j.WorkingDir)
+			fmt.Printf("Logging dir: %s\n", j.LoggingDir)
+			fmt.Printf("Num Tasks  : %d\n", j.NumTasks)
+			fmt.Printf("\n")
+		}
+	} else {
+		for _, j := range ret {
+			fmt.Printf("%8d\t%-40s\t%-12s\t%8d\n",
+				j.JobId, j.Name, j.Status, j.NumTasks)
+		}
+	}
+
+	return nil
+}
+
+func changeStateCmd(cfg fuq.Config, args []string) error {
+	req := fuq.ClientStateChangeReq{}
+	outputJSON := false
+
+	flags := flag.NewFlagSet("changeState", flag.ContinueOnError)
+	flags.BoolVar(&outputJSON, "j", outputJSON, "output json response")
+
+	flags.Parse(args[1:])
+
+	usage := Usage{args[0], "id1 id2 ...", flags}
+
+	if err := flags.Parse(args[1:]); err != nil {
+		fmt.Fprintf(os.Stderr, "error parsing %s flags: %v", args[0], err)
+		usage.ShowAndExit()
+	}
+
+	if flags.NArg() < 1 {
+		fmt.Fprintf(os.Stderr, "%s expects at least one argument (found %d)\n",
+			args[0], flags.NArg())
+		usage.ShowAndExit()
+	}
+
+	cmdArgs := flags.Args()
+
+	switch args[0] {
+	case "pause", "hold":
+		req.Action = "hold"
+	case "unpause", "release":
+		req.Action = "release"
+	case "cancel":
+		req.Action = "cancel"
+	}
+
+	req.JobIds = make([]fuq.JobId, 0, len(cmdArgs))
+	/* parse arguments */
+	for _, idArg := range cmdArgs {
+		id, err := strconv.ParseUint(idArg, 0, 64)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "invalid job id: %s\n", idArg)
+		}
+		req.JobIds = append(req.JobIds, fuq.JobId(id))
+	}
+
+	ret := []fuq.JobStateChangeResponse{}
+	if err := callEndpoint(cfg, "client/job/state", &req, &ret); err != nil {
+		return fmt.Errorf("Error encountered changing state of jobs %v: %v",
+			req.JobIds, err)
+	}
+
+	if outputJSON {
+		enc := json.NewEncoder(os.Stdout)
+		if err := enc.Encode(&ret); err != nil {
+			return fmt.Errorf("Error encoding job: %v", err)
+		}
+		return nil
+	}
+
+	for _, ch := range ret {
+		fmt.Printf("%6d\t%-12s -> %-12s\n",
+			ch.JobId, ch.PrevStatus, ch.NewStatus)
+	}
+
+	return nil
+}
+
+func workerListCmd(cfg fuq.Config, args []string) error {
+	outputJSON := false
+
+	flags := flag.NewFlagSet("workerList", flag.ContinueOnError)
+	flags.BoolVar(&outputJSON, "j", outputJSON, "output json response")
+
+	flags.Parse(args[1:])
+
+	usage := Usage{args[0], "id1 id2 ...", flags}
+
+	if err := flags.Parse(args[1:]); err != nil {
+		fmt.Fprintf(os.Stderr, "error parsing %s flags: %v", args[0], err)
+		usage.ShowAndExit()
+	}
+
+	if flags.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "%s expects no arguments (found %d)\n",
+			args[0], flags.NArg())
+		usage.ShowAndExit()
+	}
+
+	ret := []fuq.NodeInfo{}
+	if err := callEndpoint(cfg, "client/nodes", nil, &ret); err != nil {
+		return fmt.Errorf("Error encountered listing worker nodes: %v", err)
+	}
+
+	if outputJSON {
+		enc := json.NewEncoder(os.Stdout)
+		if err := enc.Encode(&ret); err != nil {
+			return fmt.Errorf("Error encoding node list: %v", err)
+		}
+		return nil
+	}
+
+	for i, ni := range ret {
+		fmt.Printf("%4d\t%-12s\t%-24s\t%3d\n",
+			i+1, ni.Node, ni.UniqName, ni.NumProc)
+	}
+
+	return nil
+}
+
+type Usage struct {
+	cmd, args string
+	flags     *flag.FlagSet
+}
+
+func (u Usage) ShowAndExit() {
+	u.Show()
+	os.Exit(1)
+}
+
+func (u Usage) Show() {
+	program := os.Args[0]
+	if u.cmd == "" {
+		/* global */
+		fmt.Fprintf(os.Stderr,
+			"usage: %s [global_flags] <cmd> [flags] <args>\nWhere <cmd> is one of\n",
+			program)
+		cmds := make([]string, 0, len(subCmds))
+		for k, _ := range subCmds {
+			cmds = append(cmds, k)
+		}
+		sort.Strings(cmds)
+		for _, n := range cmds {
+			c := subCmds[n]
+			fmt.Fprintf(os.Stderr, "\t%s\t%s\n", n, c.Description)
+		}
+		fmt.Fprintf(os.Stderr, "\nGlobal flags:\n")
+		globalSet.PrintDefaults()
+	} else {
+		fmt.Fprintf(os.Stderr, "usage: %s [global_flags] %s [flags] %s\n",
+			program, u.cmd, u.args)
+		fmt.Fprintf(os.Stderr, "\nGlobal flags:\n")
+		globalSet.PrintDefaults()
+		if u.flags != nil {
+			fmt.Fprintf(os.Stderr, "\nFlags for %s\n", u.cmd)
+			u.flags.PrintDefaults()
+		}
+	}
+}
+
+func main() {
+	var err error
+	subCmds = map[string]Command{
+		"queue":   Command{"queues a new job", queueCmd},
+		"status":  Command{"lists jobs", statusCmd},
+		"cancel":  Command{"cancels jobs", changeStateCmd},
+		"hold":    Command{"pauses queuing of a job", changeStateCmd},
+		"pause":   Command{"pauses queuing of a job", changeStateCmd},
+		"unhold":  Command{"resumes queuing of a job", changeStateCmd},
+		"release": Command{"resumes queuing of a job", changeStateCmd},
+		"wlist":   Command{"list workers", workerListCmd},
+	}
+
+	usage := Usage{}
+	if err = globalSet.Parse(os.Args[1:]); err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing global flags: %v", err)
+		usage.ShowAndExit()
+	}
+
+	if globalSet.NArg() < 1 {
+		usage.ShowAndExit()
+	}
+
+	cmdArgs := globalSet.Args()
+	cmd, ok := subCmds[cmdArgs[0]]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "unknown command %s\n", cmdArgs[0])
+		usage.ShowAndExit()
+	}
+
+	if srvConfigFile == "" {
+		if srvConfigFile = fuq.DefaultServerConfigPath(); srvConfigFile == "" {
+			fmt.Fprintf(os.Stderr, "cannot determine default server config file\n")
+			os.Exit(1)
+		}
+	}
+
+	if sysConfigFile == "" {
+		if sysConfigFile = fuq.DefaultSystemConfigPath(); sysConfigFile == "" {
+			fmt.Fprintf(os.Stderr, "cannot determine default system config file\n")
+			os.Exit(1)
+		}
+	}
+
+	if err := config.ReadConfig(sysConfigFile); err != nil {
+		fmt.Fprintf(os.Stderr, "error reading config file '%s': %v\n",
+			sysConfigFile, err)
+		os.Exit(1)
+	}
+
+	if err := config.ReadConfig(srvConfigFile); err != nil {
+		fmt.Fprintf(os.Stderr, "error reading config file '%s': %v\n",
+			srvConfigFile, err)
+		os.Exit(1)
+	}
+
+	if err := cmd.Run(config, cmdArgs); err != nil {
+		fmt.Fprintf(os.Stderr, "error encountered: %v\n", err)
+		os.Exit(1)
+	}
+}
