@@ -3,6 +3,8 @@ package fuq
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"strconv"
 )
 
 type JobRequest struct {
@@ -19,6 +21,42 @@ type JobDescription struct {
 	LoggingDir string    `json:"logging_dir"`
 	Command    string    `json:"command"`
 	Status     JobStatus `json:"status"`
+}
+
+func ReadJobFile(in io.Reader) (JobDescription, error) {
+	job := JobDescription{}
+	err := ParseKVFile(in, func(key, value string) error {
+		switch key {
+		case "name":
+			job.Name = value
+
+		case "num_tasks":
+			p, err := strconv.ParseInt(value, 10, 32)
+			if err != nil || p <= 0 {
+				return fmt.Errorf("invalid task count: %s", value)
+			}
+			job.NumTasks = int(p)
+
+		case "working_dir":
+			job.WorkingDir = value
+
+		case "log_dir":
+			job.LoggingDir = value
+
+		case "command":
+			job.Command = value
+		default:
+			return fmt.Errorf("unknown directive '%s'", key)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return JobDescription{}, fmt.Errorf("error reading job description: %v", err)
+	}
+
+	return job, nil
 }
 
 type NewJobResponse struct {

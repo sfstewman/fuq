@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/user"
@@ -203,14 +204,8 @@ func ExpandPath(p0 string) string {
 	return absP
 }
 
-func (c *Config) ReadConfig(fname string) error {
-	f, err := os.Open(fname)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	sc := bufio.NewScanner(f)
+func ParseKVFile(in io.Reader, kvFunc func(key, value string) error) error {
+	sc := bufio.NewScanner(in)
 	for line := 1; sc.Scan(); line++ {
 		// remove any comments and strip the remaining
 		b := sc.Bytes()
@@ -229,27 +224,49 @@ func (c *Config) ReadConfig(fname string) error {
 				"invalid config: expected two fields, but found %d on line %d: '%s'",
 				len(f), line, b)
 		}
-		switch cmd := string(f[0]); cmd {
+
+		k := string(f[0])
+		v := string(f[1])
+		if err := kvFunc(k, v); err != nil {
+			return fmt.Errorf("invalid key-value pair on line %d: %v",
+				line, err)
+		}
+	}
+
+	return nil
+}
+
+func (c *Config) ReadConfig(fname string) error {
+	f, err := os.Open(fname)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	return ParseKVFile(f, func(key, value string) error {
+		switch key {
 		case "dbpath":
 			if c.DbPath == "" {
-				c.DbPath = ExpandPath(string(f[1]))
+				c.DbPath = ExpandPath(value)
 			}
+
 		case "logdir":
 			if c.LogDir == "" {
-				c.LogDir = ExpandPath(string(f[1]))
+				c.LogDir = ExpandPath(value)
 			}
+
 		case "auth":
-			c.Auth = string(f[1])
+			c.Auth = value
+
 		case "foreman":
 			if c.Foreman == "" {
-				c.Foreman = string(f[1])
+				c.Foreman = value
 			}
+
 		case "port":
-			s := string(f[1])
-			p, err := strconv.ParseInt(s, 10, 32)
+			p, err := strconv.ParseInt(value, 10, 32)
 			if err != nil || p < 1024 || p > 65536 {
-				return fmt.Errorf("invalid config: invalid port on line %d: %s",
-					line, s)
+				return fmt.Errorf("invalid port: %s", value)
 			}
 			if c.Port == 0 {
 				c.Port = int(p)
@@ -260,27 +277,27 @@ func (c *Config) ReadConfig(fname string) error {
 
 		case "keyfile":
 			if c.KeyFile == "" {
-				c.KeyFile = ExpandPath(string(f[1]))
+				c.KeyFile = ExpandPath(value)
 			}
 		case "certfile":
 			if c.CertFile == "" {
-				c.CertFile = ExpandPath(string(f[1]))
+				c.CertFile = ExpandPath(value)
 			}
+
 		case "rootca":
 			if c.RootCAFile == "" {
-				c.RootCAFile = ExpandPath(string(f[1]))
+				c.RootCAFile = ExpandPath(value)
 			}
 
 		case "certname":
 			if c.CertName == "" {
-				c.CertName = string(f[1])
+				c.CertName = value
 			}
+
 		default:
-			return fmt.Errorf("invalid config: invalid directive on line %d: %s",
-				line, cmd)
+			return fmt.Errorf("invalid directive '%s'", key)
 		}
-	}
 
-	return nil
-
+		return nil
+	})
 }

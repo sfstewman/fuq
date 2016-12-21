@@ -63,12 +63,14 @@ func queueCmd(cfg fuq.Config, args []string) error {
 	}
 
 	outputJSON := false
+	jobFile := ""
 
 	queueFlags := flag.NewFlagSet("queue", flag.ContinueOnError)
 	queueFlags.IntVar(&job.NumTasks, "n", job.NumTasks, "number of tasks")
 	queueFlags.StringVar(&job.WorkingDir, "dir", job.WorkingDir, "working directory")
 	queueFlags.StringVar(&job.LoggingDir, "log", job.WorkingDir, "logging directory")
 	queueFlags.BoolVar(&outputJSON, "j", outputJSON, "output json")
+	queueFlags.StringVar(&jobFile, "f", jobFile, "read job description from a file")
 
 	usage := Usage{"queue", "job_name job_command", queueFlags}
 
@@ -77,18 +79,51 @@ func queueCmd(cfg fuq.Config, args []string) error {
 		usage.ShowAndExit()
 	}
 
-	if queueFlags.NArg() != 2 {
+	if jobFile != "" {
+		f, err := os.Open(jobFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error opening job file '%s': %v",
+				jobFile, err)
+			os.Exit(1)
+		}
+		defer f.Close()
+
+		jobInFile, err := fuq.ReadJobFile(f)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error reading job file '%s':\n%v",
+				jobFile, err)
+			os.Exit(1) // XXX: close file first?
+		}
+
+		job = jobInFile
+		// reparse to allow them to override any settings
+		if err := queueFlags.Parse(args[1:]); err != nil {
+			fmt.Fprintf(os.Stderr, "error parsing queue flags: %v", err)
+			usage.ShowAndExit()
+		}
+	}
+
+	if jobFile == "" && queueFlags.NArg() != 2 {
 		fmt.Fprintf(os.Stderr, "expected two queue arguments (found %d)\n", queueFlags.NArg())
 		usage.ShowAndExit()
 	}
 
 	qArgs := queueFlags.Args()
-	job.Name = qArgs[0]
-	job.Command = qArgs[1]
+	if len(qArgs) > 0 {
+		job.Name = qArgs[0]
+		job.Command = qArgs[1]
+	}
 	wd := job.WorkingDir
 	job.WorkingDir = fuq.ExpandPath(wd)
 	if job.WorkingDir == "" {
 		fmt.Fprintf(os.Stderr, "invalid working directory (%s): %v", wd, err)
+		usage.ShowAndExit()
+	}
+
+	ld := job.LoggingDir
+	job.LoggingDir = fuq.ExpandPath(ld)
+	if job.LoggingDir == "" {
+		fmt.Fprintf(os.Stderr, "invalid logging directory (%s): %v", wd, err)
 		usage.ShowAndExit()
 	}
 
