@@ -3,6 +3,7 @@ package srv
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -115,37 +116,34 @@ func uniquifyName(names *bolt.Bucket, name string) (string, error) {
 }
 
 func generateCookie(cookies *bolt.Bucket, ni fuq.NodeInfo) (fuq.Cookie, error) {
-	nlen := len(ni.Node) + CookieSeqNumBytes
-	raw := make([]byte, nlen, nlen)
-	copy(raw[0:len(ni.Node)], ni.Node)
+	raw := make([]byte, CookieSeqNumBytes)
+	hashed := make([]byte, base64.RawStdEncoding.EncodedLen(len(raw)))
 
 	for {
-		if _, err := rand.Read(raw[len(ni.Node):]); err != nil {
+		if _, err := rand.Read(raw[:]); err != nil {
 			return "", fmt.Errorf("error generating cookie: %v", err)
 		}
 
-		hashed, err := bcrypt.GenerateFromPassword(raw, CookieCost)
-		if err != nil {
-			return "", fmt.Errorf("error generating cookie: %v", err)
-		}
+		base64.RawStdEncoding.Encode(hashed, raw)
+		log.Printf("node %s: raw is %v, cookie is %s", ni.Node, raw, hashed)
 
-		exists := cookies.Get(hashed)
-		if exists != nil {
-			continue
+		if exists := cookies.Get(hashed); exists == nil {
+			break
 		}
-
-		cookie := fuq.Cookie(hashed)
-		b, err := msgpack.Marshal(&ni)
-		if err != nil {
-			return "", err
-		}
-
-		if err := cookies.Put(hashed, b); err != nil {
-			return "", err
-		}
-
-		return cookie, nil
+		log.Printf("retrying")
 	}
+
+	cookie := fuq.Cookie(hashed)
+	b, err := msgpack.Marshal(&ni)
+	if err != nil {
+		return "", err
+	}
+
+	if err := cookies.Put(hashed, b); err != nil {
+		return "", err
+	}
+
+	return cookie, nil
 }
 
 func (d *Dispatcher) MakeCookie(ni fuq.NodeInfo) (fuq.Cookie, error) {
@@ -915,10 +913,10 @@ func (d *Dispatcher) nextTasksForJob(tx *bolt.Tx, jobId fuq.JobId, maxTasks int)
 		}
 
 		/* FIXME: we should probably wait for some kind of response from
-		* the node ("I'm running tasks <task_list>") before marking
-		* these as 'Running'.
-		*
-		* But that's probably a goal for a future version.
+		 * the node ("I'm running tasks <task_list>") before marking
+		 * these as 'Running'.
+		 *
+		 * But that's probably a goal for a future version.
 		 */
 		tasklist = taskData.Pending[0:maxTasks]
 		taskData.Pending = taskData.Pending[maxTasks:]
