@@ -153,10 +153,10 @@ func queueCmd(cfg fuq.Config, args []string) error {
 	return nil
 }
 
-type SortByJobId []fuq.JobDescription
+type SortByJobId []fuq.JobTaskStatus
 
 func (js SortByJobId) Len() int           { return len(js) }
-func (js SortByJobId) Less(i, j int) bool { return js[i].JobId < js[j].JobId }
+func (js SortByJobId) Less(i, j int) bool { return js[i].Description.JobId < js[j].Description.JobId }
 func (js SortByJobId) Swap(i, j int)      { js[i], js[j] = js[j], js[i] }
 
 func statusCmd(cfg fuq.Config, args []string) error {
@@ -183,7 +183,8 @@ func statusCmd(cfg fuq.Config, args []string) error {
 		usage.ShowAndExit()
 	}
 
-	ret := []fuq.JobDescription{}
+	// ret := []fuq.JobDescription{}
+	ret := []fuq.JobTaskStatus{}
 	if err := callEndpoint(cfg, "client/job/list", &req, &ret); err != nil {
 		return fmt.Errorf("Error encountered queuing job: %v", err)
 	}
@@ -200,18 +201,32 @@ func statusCmd(cfg fuq.Config, args []string) error {
 
 	if longListing {
 		for _, j := range ret {
-			fmt.Printf("Job %d\n", j.JobId)
-			fmt.Printf("Name       : %s\n", j.Name)
-			fmt.Printf("Command    : %s\n", j.Command)
-			fmt.Printf("Working dir: %s\n", j.WorkingDir)
-			fmt.Printf("Logging dir: %s\n", j.LoggingDir)
-			fmt.Printf("Num Tasks  : %d\n", j.NumTasks)
-			fmt.Printf("\n")
+			jd := j.Description
+			fmt.Printf("Job %d\n", jd.JobId)
+			fmt.Printf("Name        : %s\n", jd.Name)
+			fmt.Printf("Command     : %s\n", jd.Command)
+			fmt.Printf("Working dir : %s\n", jd.WorkingDir)
+			fmt.Printf("Logging dir : %s\n", jd.LoggingDir)
+			fmt.Printf("Num Tasks   : %d\n", jd.NumTasks)
+			fmt.Printf("    Finished: %d\n", j.TasksFinished)
+			fmt.Printf("    Errors  : %d\n", j.TasksWithErrors)
+			fmt.Printf("Running     :")
+			for i, t := range j.TasksRunning {
+				if (i+1)%10 == 0 {
+					fmt.Printf("\nRunning     :")
+				}
+				fmt.Printf(" %d", t)
+			}
+			fmt.Printf("\n\n")
 		}
 	} else {
+		fmt.Printf("%-4s\t%-30.30s\t%-12s\t%-8s\t%-8s\t%-8s\n",
+			"Job", "Name", "Status", "Tasks", "Running", "Done")
 		for _, j := range ret {
-			fmt.Printf("%8d\t%-40s\t%-12s\t%8d\n",
-				j.JobId, j.Name, j.Status, j.NumTasks)
+			jd := j.Description
+			fmt.Printf("%4d\t%-30.30s\t%-12s\t%8d\t%8d\t%8d\n",
+				jd.JobId, jd.Name, jd.Status, jd.NumTasks,
+				len(j.TasksRunning), j.TasksFinished)
 		}
 	}
 

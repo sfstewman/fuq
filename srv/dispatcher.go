@@ -805,25 +805,19 @@ func (d *Dispatcher) setJobStatus(tx *bolt.Tx, jobId fuq.JobId, status fuq.JobSt
 	return prevStatus, nil
 }
 
-func (d *Dispatcher) updateJobTasksInTx(tx *bolt.Tx, jobId fuq.JobId, fxn func(*fuq.JobTaskData) error) error {
-
-	jb, err := getJobBucket(tx)
-	if err != nil {
-		return err
-	}
-
+func (d *Dispatcher) fetchJobTasksFromBkt(jb *bolt.Bucket, jobId fuq.JobId) (*fuq.JobTaskData, error) {
 	taskData := fuq.JobTaskData{}
 	jobTaskKey := getJobTaskKey(jobId)
 	rawTaskData := jb.Get(jobTaskKey)
 	if rawTaskData != nil {
 		if err := msgpack.Unmarshal(rawTaskData, &taskData); err != nil {
-			return fmt.Errorf("error unmarshaling task data for job %d: %v",
+			return nil, fmt.Errorf("error unmarshaling task data for job %d: %v",
 				uint64(jobId), err)
 		}
 	} else {
 		desc, err := fetchJob(jb, jobId)
 		if err != nil {
-			return fmt.Errorf("error fetching job description to generate task data: %v",
+			return nil, fmt.Errorf("error fetching job description to generate task data: %v",
 				err)
 		}
 		taskData.JobId = jobId
@@ -833,11 +827,28 @@ func (d *Dispatcher) updateJobTasksInTx(tx *bolt.Tx, jobId fuq.JobId, fxn func(*
 		}
 	}
 
-	if err := fxn(&taskData); err != nil {
+	return &taskData, nil
+
+}
+
+func (d *Dispatcher) updateJobTasksInTx(tx *bolt.Tx, jobId fuq.JobId, fxn func(*fuq.JobTaskData) error) error {
+	jb, err := getJobBucket(tx)
+	if err != nil {
 		return err
 	}
 
-	rawTaskData, err = msgpack.Marshal(taskData)
+	taskData, err := d.fetchJobTasksFromBkt(jb, jobId)
+	if err != nil {
+		return fmt.Errorf("error fetching task data for job %d: %v",
+			jobId, err)
+	}
+
+	if err := fxn(taskData); err != nil {
+		return err
+	}
+
+	jobTaskKey := getJobTaskKey(jobId)
+	rawTaskData, err := msgpack.Marshal(taskData)
 	if err != nil {
 		return fmt.Errorf("error marshaling updated task data for job %d: %v",
 			uint64(jobId), err)
@@ -964,6 +975,45 @@ func (d *Dispatcher) getAvailableTasks(tx *bolt.Tx, jobId fuq.JobId, max int) ([
 	}
 
 	return tasks, nil
+}
+
+func (d *Dispatcher) FetchJobTaskStatus(jobId fuq.JobId) (fuq.JobTaskStatus, error) {
+	var status fuq.JobTaskStatus
+
+	err := d.db.View(func(tx *bolt.Tx) error {
+		jb, err := getJobBucket(tx)
+		if err != nil {
+			return err
+		}
+
+		desc, err := fetchJobFromTx(tx, jobId)
+		if err != nil {
+			return err
+		}
+
+		taskData, err := d.fetchJobTasksFromBkt(jb, jobId)
+		if err != nil {
+			return err
+		}
+
+		status.Description = desc
+		status.TasksFinished = len(taskData.Finished)
+		status.TasksPending = len(taskData.Pending)
+		status.TasksRunning = make([]int, len(taskData.Running))
+		status.TasksWithErrors = make([]int, len(taskData.Errors))
+
+		for i, task := range taskData.Running {
+			status.TasksRunning[i] = task
+		}
+
+		for i, task := range taskData.Errors {
+			status.TasksWithErrors[i] = task
+		}
+
+		return nil
+	})
+
+	return status, err
 }
 
 func (d *Dispatcher) FetchPendingTasks(nproc int) ([]fuq.Task, error) {

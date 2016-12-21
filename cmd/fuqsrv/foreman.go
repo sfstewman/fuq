@@ -276,11 +276,33 @@ func (f *Foreman) HandleClientJobList(resp http.ResponseWriter, req *http.Reques
 		return
 	}
 
-	srv.RespondWithJSON(resp, &jobs)
+	jtStatus := make([]fuq.JobTaskStatus, len(jobs))
+
+	for i, j := range jobs {
+		if j.Status != fuq.Running {
+			jtStatus[i].Description = j
+			continue
+		}
+
+		jtStatus[i], err = f.FetchJobTaskStatus(j.JobId)
+		if err != nil {
+			log.Printf("error retrieving tasks for job %d: %v", j.JobId, err)
+			fuq.InternalError(resp, req)
+			return
+		}
+	}
+
+	srv.RespondWithJSON(resp, &jtStatus)
 }
 
 func isValidJob(job fuq.JobDescription) bool {
 	return true
+}
+
+func (f *Foreman) WakeupListeners() {
+	f.jobsSignal.mu.Lock()
+	f.jobsSignal.cond.Broadcast()
+	f.jobsSignal.mu.Unlock()
 }
 
 func (f *Foreman) HandleClientJobNew(resp http.ResponseWriter, req *http.Request, mesg []byte) {
@@ -478,7 +500,7 @@ func (f *Foreman) StartAPIServer() error {
 	f.AddHandler(mux, "/node/reauth", f.HandleNodeReauth)
 	f.AddNodeHandler(mux, "/job/request", f.HandleNodeJobRequest)
 	f.AddNodeHandler(mux, "/job/status", f.HandleNodeJobUpdate)
-	f.AddClientHandler(mux, "/client/nodes", f.HandleClientNodeList)
+	f.AddClientHandler(mux, "/client/nodes/list", f.HandleClientNodeList)
 	f.AddClientHandler(mux, "/client/job/list", f.HandleClientJobList)
 	f.AddClientHandler(mux, "/client/job/new", f.HandleClientJobNew)
 	f.AddClientHandler(mux, "/client/job/clear", f.HandleClientJobClear)

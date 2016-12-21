@@ -23,6 +23,14 @@ type JobDescription struct {
 	Status     JobStatus `json:"status"`
 }
 
+type JobTaskStatus struct {
+	Description     JobDescription
+	TasksFinished   int   // Number of tasks that are finished.
+	TasksPending    int   // Number of tasks not yet running.
+	TasksRunning    []int // Tasks currently currently running.
+	TasksWithErrors []int
+}
+
 func ReadJobFile(in io.Reader) (JobDescription, error) {
 	job := JobDescription{}
 	err := ParseKVFile(in, func(key, value string) error {
