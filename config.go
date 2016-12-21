@@ -37,6 +37,8 @@ type Config struct {
 	Foreman string
 	Port    int
 
+	ForemanLogFile string
+
 	CertName string // server name in TLS certificate
 
 	KeyFile    string
@@ -103,12 +105,21 @@ func (c *Config) GenerateConfig(fname string, overwrite bool) error {
 		return fmt.Errorf("error generating config file: %v", err)
 	}
 
-	hostname, err := os.Hostname()
-	if err != nil {
-		return fmt.Errorf("error generating config file: %v", err)
+	// Rules for the foreman address:
+	//   1) if prefixed with '!', use the rest, so "!foo" uses "foo"
+	//   2) if "localhost", then use "localhost"
+	//   3) otherwise use the hostname
+	if len(c.Foreman) > 1 && c.Foreman[0] == '!' {
+		c.Foreman = c.Foreman[1:]
+	} else if c.Foreman != "localhost" {
+		hostname, err := os.Hostname()
+		if err != nil {
+			return fmt.Errorf("error generating config file: %v", err)
+		}
+
+		c.Foreman = hostname
 	}
 
-	c.Foreman = hostname
 	if c.Port == 0 {
 		c.Port = DefaultPort
 	}
@@ -270,6 +281,11 @@ func (c *Config) ReadConfig(fname string) error {
 			}
 			if c.Port == 0 {
 				c.Port = int(p)
+			}
+
+		case "foremanlog":
+			if c.ForemanLogFile == "" {
+				c.ForemanLogFile = ExpandPath(value)
 			}
 
 		case "key":

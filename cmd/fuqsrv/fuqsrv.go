@@ -696,9 +696,11 @@ func (w *Worker) Close() {
 func main() {
 	var (
 		err                          error
-		isForeman                    bool
+		isForeman, onlyWriteConfig   bool
 		hostname, workerName         string
 		srvConfigFile, sysConfigFile string
+		retryServerConfig            bool
+		initialWait                  int
 		config                       fuq.Config
 		overwriteConfig              bool
 		numCPUs                      int
@@ -707,6 +709,7 @@ func main() {
 
 	// command line options
 	isForeman = false
+	onlyWriteConfig = false
 
 	// set worker name, defaults to hostname
 	hostname, err = os.Hostname()
@@ -730,6 +733,7 @@ func main() {
 
 	// Setup command-line flags
 	flag.BoolVar(&isForeman, "f", false, "invoke fuq as foreman")
+	flag.BoolVar(&onlyWriteConfig, "w", false, "invoke fuq and foreman, write config, and exit")
 	flag.IntVar(&numCPUs, "np", 1, "number of concurrent cores")
 	flag.StringVar(&workerName, "p", workerName, "worker prefix")
 	flag.StringVar(&srvConfigFile, "srv", srvConfigFile, "server configuration file")
@@ -737,8 +741,13 @@ func main() {
 	flag.BoolVar(&overwriteConfig, "force_cfg", overwriteConfig,
 		"overwrite config file (if foreman)")
 
+	flag.IntVar(&initialWait, "wait0", initialWait, "seconds to wait before starting")
+	flag.BoolVar(&retryServerConfig, "retry_cfg", retryServerConfig,
+		"retries reading the server config on error")
+
 	flag.StringVar(&config.DbPath, "db", "", "path to database")
 	flag.StringVar(&config.LogDir, "log", "", "queue logging directory")
+	flag.StringVar(&config.ForemanLogFile, "flog", "", "foreman logging file")
 	flag.IntVar(&config.Port, "port", 0, "foreman port")
 
 	flag.StringVar(&config.KeyFile, "key", "", "path to TLS key file")
@@ -756,6 +765,15 @@ func main() {
 		log.Fatalf("No default or given config file")
 	}
 
+	if initialWait > 0 {
+		log.Printf("sleeping %d seconds before startup", initialWait)
+		time.Sleep(time.Duration(initialWait) * time.Second)
+	}
+
+	if onlyWriteConfig {
+		isForeman = true
+	}
+
 	if isForeman {
 		if err := config.ReadConfig(sysConfigFile); err != nil {
 			// igore if the system configuration file does not exist
@@ -769,10 +787,29 @@ func main() {
 			log.Fatalf("error generating config file '%s': %v",
 				srvConfigFile, err)
 		}
+
+		if onlyWriteConfig {
+			os.Exit(0)
+		}
 	} else {
-		if err := config.ReadConfig(srvConfigFile); err != nil {
-			log.Fatalf("error reading config file '%s': %v",
+		config0 := config
+
+		for retries := 0; true; retries++ {
+			err := config.ReadConfig(srvConfigFile)
+			if err == nil {
+				break
+			}
+			log.Printf("error reading config file '%s': %v",
 				srvConfigFile, err)
+
+			if !retryServerConfig || retries >= MaxConfigRetries {
+				os.Exit(1)
+			}
+
+			time.Sleep(2 * time.Second) // XXX: remove hard-coded value
+
+			// reset in case we had a bad read
+			config = config0
 		}
 
 		if err := config.ReadConfig(sysConfigFile); err != nil {
