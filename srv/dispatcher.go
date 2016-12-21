@@ -233,6 +233,7 @@ func (d *Dispatcher) Lookup(cookie fuq.Cookie) (fuq.NodeInfo, error) {
 			return nil
 		}
 
+		log.Printf("looking up cookie '%s'", cookie)
 		v := cookies.Get([]byte(cookie))
 		if v == nil {
 			return nil
@@ -241,11 +242,47 @@ func (d *Dispatcher) Lookup(cookie fuq.Cookie) (fuq.NodeInfo, error) {
 		if err := msgpack.Unmarshal(v, &ni); err != nil {
 			return err
 		}
+		log.Printf("found node '%s'", ni.UniqName)
 
 		return nil
 	})
 
 	return ni, err
+}
+
+// Note: tags are not indexed, so this requires a full scan of all
+// nodes.  This should be fine unless the number of nodes gets pretty
+// large.  At that point, we should add an index.
+func (d *Dispatcher) NodesWithTag(tag string) ([]fuq.NodeInfo, error) {
+	var nodes []fuq.NodeInfo = nil
+
+	err := d.db.View(func(tx *bolt.Tx) error {
+		cookies := tx.Bucket(cookieBucket)
+		n := cookies.Stats().KeyN
+		nodes = make([]fuq.NodeInfo, 0, n)
+
+		err := cookies.ForEach(func(k, v []byte) error {
+			ni := fuq.NodeInfo{}
+			err := msgpack.Unmarshal(v, &ni)
+			if err != nil {
+				return err
+			}
+
+			// linear scan... we can do better here
+			for _, t := range ni.Tags {
+				if t == tag {
+					nodes = append(nodes, ni)
+					return nil
+				}
+			}
+
+			return nil
+		})
+
+		return err
+	})
+
+	return nodes, err
 }
 
 func (d *Dispatcher) AllNodes() ([]fuq.NodeInfo, error) {

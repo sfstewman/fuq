@@ -43,8 +43,8 @@ func BadRequest(resp http.ResponseWriter, req *http.Request) {
 }
 
 func Forbidden(resp http.ResponseWriter, req *http.Request) {
-	resp.WriteHeader(http.StatusForbidden)
-	fmt.Fprintf(resp, "%d access forbidden\n",
+	http.Error(resp,
+		fmt.Sprintf("%d access forbidden", http.StatusForbidden),
 		http.StatusForbidden)
 }
 
@@ -120,13 +120,13 @@ func (e Endpoint) SendMessage(endpoint string, mesg interface{}) (*http.Response
 	r := bytes.NewReader(data)
 	resp, err := e.Client.Post(url, "application/json", r)
 	if err != nil {
-		return nil, fmt.Errorf("error during post to '%s': %v", endpoint, err)
+		return nil, err
 	}
 
 	return resp, nil
 }
 
-func (e *Endpoint) CallEndpoint(endpoint string, mesg, result interface{}) error {
+func (e Endpoint) CallEndpoint(endpoint string, mesg, result interface{}) error {
 	resp, err := e.SendMessage(endpoint, mesg)
 	if err != nil {
 		return err
@@ -137,9 +137,11 @@ func (e *Endpoint) CallEndpoint(endpoint string, mesg, result interface{}) error
 		return WithStatus(resp)
 	}
 
-	dec := json.NewDecoder(resp.Body)
-	if err := dec.Decode(result); err != nil {
-		return fmt.Errorf("error decoding response from '%s': %v", endpoint, err)
+	if result != nil {
+		dec := json.NewDecoder(resp.Body)
+		if err := dec.Decode(result); err != nil {
+			return fmt.Errorf("error decoding response from '%s': %v", endpoint, err)
+		}
 	}
 
 	return nil

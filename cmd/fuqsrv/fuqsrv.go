@@ -15,6 +15,8 @@ import (
 	"github.com/sfstewman/fuq/srv"
 	"log"
 	"math/rand"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -23,15 +25,16 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-// import _ "net/http/pprof"
-
-func WriteFuqConfig(cfg fuq.Config) {
-	// write fuq config:
-	//   hostname, port to contact
-}
+/*
+import (
+	"net/http"
+	_ "net/http/pprof"
+)
+*/
 
 /* API:
  *
@@ -124,12 +127,17 @@ func WriteFuqConfig(cfg fuq.Config) {
  *	The actual part that varies from call to call is
  *	in the "msg" part.
  *
- * NODE LIST: list nodes			*done*
- *	POST /client/nodes
+ * NODE LIST: list nodes
+ *	POST /client/nodes/list
  *	{
  *		"auth" : <client_auth>,
+ *		"msg"  : {
+ *			"tags" : <list of tag strings>,
+ *		},
  *	}
- *	NB: there's no msg part
+ *
+ *	The "msg" part is optional.  Tags are user-defined strings that
+ *	can identify one of more nodes.
  *
  *	Success:
  *	[ node_info1, node_info2, ..., node_infoN ]
@@ -140,6 +148,22 @@ func WriteFuqConfig(cfg fuq.Config) {
  *		"uniq_name" : unique_node_name,
  *		"nproc" : number_of_processors,
  *	}
+ *
+ * NODE SHUTDOWN: tells a node to shut down when it's finished running
+ * its current job
+ *	POST /client/nodes/shutdown
+ *	{
+ *		"auth" : <client_auth>,
+ *		"msg"  : {
+ *			"uniq_names" : <list of node uniq names>,
+ *		},
+ *	}
+ *
+ *	Success:
+ *	HTTP success code
+ *
+ *	Failure:
+ *	HTTP error code
  *
  * JOB LIST: list jobs			*done*
  *
@@ -373,6 +397,12 @@ type WaitAction struct {
 }
 
 const (
+	MaxConfigRetries = 10
+
+	HelloTries      = 10
+	HelloBackoff    = 500 * time.Millisecond
+	HelloMaxBackoff = 1 * time.Minute
+
 	DefaultInterval  = 5 * time.Second
 	IntervalIncrease = 500 * time.Millisecond
 	MaxInterval      = 60 * time.Second
@@ -386,7 +416,9 @@ func (w WaitAction) Wait() {
 	time.Sleep(delay)
 }
 
-type StopAction struct{}
+type StopAction struct {
+	All bool
+}
 
 type RunAction fuq.Task
 
@@ -441,12 +473,148 @@ func (r RunAction) Run(logger *log.Logger) (fuq.JobStatusUpdate, error) {
 	return status, nil
 }
 
-type Worker struct {
-	Logger *log.Logger
-	*fuq.Endpoint
-	Name     string
+type WorkerConfig struct {
+	mu       sync.RWMutex
 	Cookie   fuq.Cookie
 	NodeInfo fuq.NodeInfo
+	allStop  bool
+}
+
+func NewWorkerConfig(nodeName string, nproc int, tags []string) *WorkerConfig {
+	return &WorkerConfig{
+		NodeInfo: fuq.NodeInfo{
+			Node:    nodeName,
+			NumProc: nproc,
+			Tags:    tags,
+		},
+	}
+}
+
+func (wc *WorkerConfig) IsAllStop() bool {
+	wc.mu.RLock()
+	defer wc.mu.RUnlock()
+	return wc.allStop
+}
+
+func (wc *WorkerConfig) AllStop() {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+	wc.allStop = true
+}
+
+func (wc *WorkerConfig) GetCookie() fuq.Cookie {
+	wc.mu.RLock()
+	defer wc.mu.RUnlock()
+
+	return wc.Cookie
+}
+
+func (wc *WorkerConfig) NewCookie(ep *fuq.Endpoint) error {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+
+	hello := fuq.Hello{
+		Auth:     ep.Config.Auth,
+		NodeInfo: wc.NodeInfo,
+	}
+
+	ret := srv.HelloResponseEnv{
+		Name:   &wc.NodeInfo.UniqName,
+		Cookie: &wc.Cookie,
+	}
+
+	log.Print("Calling HELLO endpoint")
+
+	if err := ep.CallEndpoint("hello", &hello, &ret); err != nil {
+		return err
+	}
+
+	log.Printf("name is %s.  cookie is %s\n", wc.NodeInfo.UniqName, wc.Cookie)
+
+	return nil
+}
+
+func (wc *WorkerConfig) NewCookieWithRetries(ep *fuq.Endpoint, maxtries int) error {
+	var err error
+	backoff := HelloBackoff
+
+	for ntries := 0; ntries < maxtries; ntries++ {
+		err = wc.NewCookie(ep)
+		if err == nil {
+			return nil
+		}
+		// log.Printf("connection error: %#v", err)
+
+		netErr, ok := err.(net.Error)
+		if !ok {
+			log.Printf("other error: %v", err)
+			return err
+		}
+
+		switch e := netErr.(type) {
+		case *url.Error:
+			log.Printf("error in dialing: %v", e)
+		case *net.OpError:
+			log.Printf("op error: %v (temporary? %v)", e, e.Temporary())
+		case *net.AddrError:
+			log.Printf("addr error: %v (temporary? %v)", e, e.Temporary())
+		default:
+			log.Printf("other net error: %v (temporary? %v)", e, e.Temporary())
+		}
+
+		log.Printf("waiting %.2f seconds before retrying", backoff.Seconds())
+		time.Sleep(backoff)
+		backoff *= 2
+		if backoff > HelloMaxBackoff {
+			backoff = HelloMaxBackoff
+		}
+	}
+
+	return err
+}
+
+func (wc *WorkerConfig) RefreshCookie(ep *fuq.Endpoint, oldCookie fuq.Cookie) error {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+
+	if wc.Cookie != oldCookie {
+		return nil
+	}
+
+	hello := fuq.Hello{
+		Auth:     ep.Config.Auth,
+		NodeInfo: wc.NodeInfo,
+	}
+
+	req := srv.NodeRequestEnvelope{
+		Cookie: wc.Cookie,
+		Msg:    &hello,
+	}
+
+	name := ""
+	ret := srv.HelloResponseEnv{
+		Name:   &name,
+		Cookie: &wc.Cookie,
+	}
+
+	if err := ep.CallEndpoint("node/reauth", &req, &ret); err != nil {
+		return err
+	}
+
+	if name != wc.NodeInfo.UniqName {
+		log.Fatalf("invalid: cookie refresh changed unique name from %s to %s",
+			wc.NodeInfo.UniqName, name)
+	}
+
+	return nil
+}
+
+type Worker struct {
+	Seq    int
+	Logger *log.Logger
+	*fuq.Endpoint
+	Name   string
+	Config *WorkerConfig
 }
 
 func NewWorker(name string, config fuq.Config) (*Worker, error) {
@@ -463,56 +631,38 @@ func NewWorker(name string, config fuq.Config) (*Worker, error) {
 	return w, nil
 }
 
-func (w *Worker) Hello() error {
-	w.NodeInfo = fuq.NodeInfo{
-		Node:    w.Name,
-		NumProc: 1,
+/*
+func NewWorkerWithNodeInfo(ni fuq.NodeInfo, config fuq.Config) (*Worker, error) {
+	endpoint, err := fuq.NewEndpoint(config)
+	if err != nil {
+		return nil, err
 	}
 
-	hello := fuq.Hello{
-		Auth:     w.Config.Auth,
-		NodeInfo: w.NodeInfo,
+	w := &Worker{
+		Endpoint: endpoint,
+		Name:     ni.Name,
 	}
 
-	ret := srv.HelloResponseEnv{
-		Name:   &w.NodeInfo.UniqName,
-		Cookie: &w.Cookie,
-	}
+	return w, nil
+}
+*/
 
-	if err := w.CallEndpoint("hello", &hello, &ret); err != nil {
-		return err
-	}
+/*
+func NodeHello(name string, c fuq.Config) (fuq.NodeInfo, error) {
 
-	return nil
+}
+*/
+
+func (w *Worker) Cookie() fuq.Cookie {
+	return w.Config.GetCookie()
 }
 
-func (w *Worker) RefreshCookie() error {
-	hello := fuq.Hello{
-		Auth:     w.Config.Auth,
-		NodeInfo: w.NodeInfo,
-	}
+func (w *Worker) UniqName() string {
+	return w.Config.NodeInfo.UniqName
+}
 
-	req := srv.NodeRequestEnvelope{
-		Cookie: w.Cookie,
-		Msg:    &hello,
-	}
-
-	name := ""
-	ret := srv.HelloResponseEnv{
-		Name:   &name,
-		Cookie: &w.Cookie,
-	}
-
-	if err := w.CallEndpoint("node/reauth", &req, &ret); err != nil {
-		return err
-	}
-
-	if name != w.NodeInfo.UniqName {
-		log.Fatalf("invalid: cookie refresh changed unique name from %s to %s",
-			w.NodeInfo.UniqName, name)
-	}
-
-	return nil
+func (w *Worker) RefreshCookie(oldCookie fuq.Cookie) error {
+	return w.Config.RefreshCookie(w.Endpoint, oldCookie)
 }
 
 func (w *Worker) LogIfError(err error, pfxFmt string, args ...interface{}) {
@@ -537,9 +687,10 @@ func (w *Worker) Log(format string, args ...interface{}) {
 * XXX
  */
 func (w *Worker) RequestAction(nproc int) (interface{}, error) {
+	cookie := w.Cookie()
 
 	req := srv.NodeRequestEnvelope{
-		Cookie: w.Cookie,
+		Cookie: cookie,
 		Msg: fuq.JobRequest{
 			NumProc: nproc,
 		},
@@ -554,11 +705,10 @@ retry:
 		if fuq.IsForbidden(err) && ntries < MaxRefreshTries {
 			ntries++
 			w.Log("Stale cookie")
-			err = w.RefreshCookie()
+			err = w.RefreshCookie(cookie)
 			if err == nil {
 				w.Log("Refreshed cookie")
-				log.Printf("%s: REAUTH successful", w.NodeInfo.UniqName)
-				req.Cookie = w.Cookie
+				req.Cookie = w.Cookie()
 				goto retry
 			}
 		}
@@ -576,6 +726,12 @@ retry:
 		return WaitAction{}, nil
 	}
 
+	// FIXME: this is a hack.
+	if ret[0].Task < 0 && ret[0].JobDescription.JobId == 0 && ret[0].JobDescription.Name == "::stop::" {
+		w.Log("received node stop request: %v", ret)
+		return StopAction{All: true}, nil
+	}
+
 	w.Log("received job request: %v", ret)
 
 	act := RunAction(ret[0])
@@ -588,7 +744,7 @@ func (w *Worker) UpdateAndRequestAction(status fuq.JobStatusUpdate, nproc int) (
 	}
 
 	req := srv.NodeRequestEnvelope{
-		Cookie: w.Cookie,
+		Cookie: w.Cookie(),
 		Msg:    &status,
 	}
 
@@ -613,19 +769,14 @@ func (w *Worker) UpdateAndRequestAction(status fuq.JobStatusUpdate, nproc int) (
 }
 
 func (w *Worker) Loop() {
-	// 'HELLO' handshake with foreman
-	if err := w.Hello(); err != nil {
-		log.Fatal(err)
-	}
-
 	// sanitize colons by replacing them with underscores
-	uniqName := strings.Replace(w.NodeInfo.UniqName, ":", "_", -1)
+	uniqName := strings.Replace(w.UniqName(), ":", "_", -1)
 
 	log.Printf("HELLO finished.  Unique name is '%s'",
-		w.NodeInfo.UniqName)
+		w.UniqName())
 
-	logPath := filepath.Join(w.Config.LogDir,
-		fmt.Sprintf("%s.log", uniqName))
+	logPath := filepath.Join(w.Endpoint.Config.LogDir,
+		fmt.Sprintf("%s-%d.log", uniqName, w.Seq))
 
 	logFile, err := os.Create(logPath)
 	fuq.FatalIfError(err, "error creating worker log '%s'", logPath)
@@ -636,7 +787,7 @@ func (w *Worker) Loop() {
 
 	numWaits := 0
 run_loop:
-	for {
+	for !w.Config.IsAllStop() {
 		// request a job from the foreman
 		req, err := w.RequestAction(1)
 		if err != nil {
@@ -659,12 +810,15 @@ run_loop:
 			continue run_loop
 
 		case StopAction:
+			if r.All {
+				w.Config.AllStop()
+			}
 			break run_loop
 
 		case RunAction:
 			numWaits = 0 // reset wait counter
 			if r.LoggingDir == "" {
-				r.LoggingDir = w.Config.LogDir
+				r.LoggingDir = w.Endpoint.Config.LogDir
 			}
 
 			status, err := r.Run(w.Logger)
@@ -693,6 +847,41 @@ func (w *Worker) Close() {
 	/* nop for now */
 }
 
+func startWorkers(wcfg *WorkerConfig, nproc int, config fuq.Config, wg *sync.WaitGroup) error {
+	if nproc <= 0 {
+		return nil
+	}
+
+	ep, err := fuq.NewEndpoint(config)
+	if err != nil {
+		return fmt.Errorf("error starting workers: %v", err)
+	}
+
+	if err := wcfg.NewCookieWithRetries(ep, HelloTries); err != nil {
+		return fmt.Errorf("error obtaining cookies: %v", err)
+	}
+
+	for i := 0; i < nproc; i++ {
+		log.Printf("Starting worker %d", i+1)
+		wg.Add(1)
+		go func(seq int) {
+			defer wg.Done()
+
+			w := Worker{
+				Seq:      seq,
+				Endpoint: ep,
+				Name:     wcfg.NodeInfo.Node,
+				Config:   wcfg,
+			}
+			defer w.Close()
+
+			w.Loop()
+		}(i + 1)
+	}
+
+	return nil
+}
+
 func main() {
 	var (
 		err                          error
@@ -700,6 +889,7 @@ func main() {
 		hostname, workerName         string
 		srvConfigFile, sysConfigFile string
 		retryServerConfig            bool
+		workerTag                    string
 		initialWait                  int
 		config                       fuq.Config
 		overwriteConfig              bool
@@ -754,6 +944,8 @@ func main() {
 	flag.StringVar(&config.CertFile, "cert", "", "path to TLS cert file")
 	flag.StringVar(&config.RootCAFile, "ca", "", "path to TLS root ca file")
 	flag.StringVar(&config.CertName, "certname", "", "name in TLS certificate")
+
+	flag.StringVar(&workerTag, "tag", "", "tag for workers")
 
 	flag.Parse()
 
@@ -846,8 +1038,11 @@ func main() {
 
 	nproc := numCPUs
 
+	wg := sync.WaitGroup{}
+
 	if isForeman {
 		log.Printf("Starting foreman")
+
 		go func() {
 			f, err := NewForeman(config, done)
 			defer close(done)
@@ -863,29 +1058,39 @@ func main() {
 				return
 			}
 		}()
+
+		// decrement so we only start N-1 workers
 		nproc--
 	}
 
-	for i := 0; i < nproc; i++ {
-		log.Printf("Starting worker")
+	var tags []string
+	if workerTag != "" {
+		tags = []string{workerTag}
+	}
+
+	wc := NewWorkerConfig(workerName, nproc, tags)
+	if err := startWorkers(wc, nproc, config, &wg); err != nil {
+		log.Fatalf("error starting workers: %v", err)
+	}
+
+	if !isForeman {
+		/* exit when the last worker is done.  this goroutine
+		 * waits on wg and then issues a done signal
+		 */
 		go func() {
-			w, err := NewWorker(workerName, config)
-			if err != nil {
-				log.Printf("error starting worker %d: %v", err)
-				close(done)
-				return
-			}
-			defer w.Close()
-
-			/*
-				go func() {
-					log.Println(http.ListenAndServe("localhost:6060", nil))
-				}()
-			*/
-
-			w.Loop()
+			defer close(done)
+			wg.Wait()
+			log.Println("Last worker is done, finishing up")
 		}()
 	}
+
+	/*
+		if isForeman {
+			go func() {
+				log.Println(http.ListenAndServe("localhost:6060", nil))
+			}()
+		}
+	*/
 
 runloop:
 	for {

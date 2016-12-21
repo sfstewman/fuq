@@ -7,11 +7,21 @@ import (
 	"github.com/sfstewman/fuq/srv"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 )
 
 type Foreman struct {
 	*srv.Dispatcher
+
+	// XXX: worth replacing with something that can scale?
+	// we need to lock the database with every request; should
+	// we just use that lock?
+	shutdownReq struct {
+		mu           sync.RWMutex
+		shutdownHost map[string]struct{}
+	}
+
 	jobsSignal struct {
 		mu   sync.Mutex
 		cond *sync.Cond
@@ -31,8 +41,19 @@ func NewForeman(config fuq.Config, done chan<- struct{}) (*Foreman, error) {
 	}
 
 	f.jobsSignal.cond = sync.NewCond(&f.jobsSignal.mu)
+	f.shutdownReq.shutdownHost = make(map[string]struct{})
 
 	return &f, nil
+}
+
+func (f *Foreman) IsNodeShutdown(name string) bool {
+	f.shutdownReq.mu.RLock()
+	defer f.shutdownReq.mu.RUnlock()
+
+	_, ok := f.shutdownReq.shutdownHost[name]
+	log.Printf("checking if node %s has a shutdown request: %v",
+		name, ok)
+	return ok
 }
 
 func (f *Foreman) CheckAuth(cred string) bool {
@@ -46,7 +67,8 @@ func (f *Foreman) CheckClient(client fuq.Client) bool {
 func (f *Foreman) HandleHello(resp http.ResponseWriter, req *http.Request) {
 	dec := json.NewDecoder(req.Body)
 	hello := fuq.Hello{}
-	log.Printf("received HELLO request from %s", req.Host)
+	fmt.Fprintf(os.Stderr, "--> HELLO from %s\n", req.RemoteAddr)
+	log.Printf("received HELLO request from %s", req.RemoteAddr)
 	if err := dec.Decode(&hello); err != nil {
 		log.Printf("error unmarshaling request at %s: %v",
 			req.URL, err)
@@ -61,6 +83,8 @@ func (f *Foreman) HandleHello(resp http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	fmt.Fprintf(os.Stderr, "--> Making a cookie for %s with info %v\n",
+		req.RemoteAddr, hello.NodeInfo)
 	cookie, err := f.MakeCookie(hello.NodeInfo)
 	if err != nil {
 		log.Printf("error registering workers: %v", err)
@@ -162,6 +186,21 @@ func (f *Foreman) HandleNodeJobUpdate(resp http.ResponseWriter, req *http.Reques
 	f.replyToRequest(resp, req, ni, jobReq)
 }
 
+func (f *Foreman) replyWithShutdown(resp http.ResponseWriter, req *http.Request) {
+	// FIXME: this is a hack...
+	repl := []fuq.Task{
+		fuq.Task{
+			Task: -1,
+			JobDescription: fuq.JobDescription{
+				JobId: 0,
+				Name:  "::stop::",
+			},
+		},
+	}
+
+	srv.RespondWithJSON(resp, repl)
+}
+
 func (f *Foreman) replyToRequest(resp http.ResponseWriter, req *http.Request, ni fuq.NodeInfo, jobReq fuq.JobRequest) {
 	var (
 		jobsAvail chan struct{}
@@ -177,6 +216,11 @@ func (f *Foreman) replyToRequest(resp http.ResponseWriter, req *http.Request, ni
 	ctx := req.Context()
 
 	for {
+		if f.IsNodeShutdown(ni.UniqName) {
+			f.replyWithShutdown(resp, req)
+			return
+		}
+
 		// request jobs
 		tasks, err = f.FetchPendingTasks(jobReq.NumProc)
 		if err != nil {
@@ -250,6 +294,35 @@ func (f *Foreman) HandleClientNodeList(resp http.ResponseWriter, req *http.Reque
 	}
 
 	srv.RespondWithJSON(resp, &nodes)
+}
+
+func (f *Foreman) HandleClientNodeShutdown(resp http.ResponseWriter, req *http.Request, mesg []byte) {
+	var msg struct {
+		UniqNames []string `json:"uniq_names"`
+	}
+
+	if err := json.Unmarshal(mesg, &msg); err != nil {
+		log.Printf("error unmarshaling node shutdown request at %s: %v",
+			req.URL, err)
+		fuq.BadRequest(resp, req)
+		return
+	}
+
+	log.Printf("shutdown: received message: %s", mesg)
+	log.Printf("shutdown: unmarshalled: %s", msg)
+
+	f.shutdownReq.mu.Lock()
+	defer f.shutdownReq.mu.Unlock()
+	for _, n := range msg.UniqNames {
+		log.Printf("shutdown request for node '%s'", n)
+		f.shutdownReq.shutdownHost[n] = struct{}{}
+	}
+
+	// wakeup all listeners so anything we want to shut down won't
+	// keep waiting until a job is queued...
+	f.WakeupListeners()
+
+	srv.RespondWithJSON(resp, struct{ ok bool }{true})
 }
 
 func (f *Foreman) HandleClientJobList(resp http.ResponseWriter, req *http.Request, mesg []byte) {
@@ -340,9 +413,7 @@ func (f *Foreman) HandleClientJobNew(resp http.ResponseWriter, req *http.Request
 
 	jobDesc.JobId = jobId
 
-	f.jobsSignal.mu.Lock()
-	f.jobsSignal.cond.Broadcast()
-	f.jobsSignal.mu.Unlock()
+	f.WakeupListeners()
 	log.Printf("queued job %v from host %s", jobDesc, req.Host)
 
 	srv.RespondWithJSON(resp, &fuq.NewJobResponse{JobId: jobId})
@@ -436,6 +507,8 @@ func (f *Foreman) AddNodeHandler(mux *http.ServeMux, path string, handler srv.No
 			return
 		}
 
+		log.Printf("cookie %s from node %v", envelope.Cookie, ni)
+
 		if ni.Node == "" {
 			fuq.Forbidden(resp, req)
 			return
@@ -498,13 +571,18 @@ func (f *Foreman) StartAPIServer() error {
 	log.Printf("Adding handlers")
 	f.AddHandler(mux, "/hello", f.HandleHello)
 	f.AddHandler(mux, "/node/reauth", f.HandleNodeReauth)
+
 	f.AddNodeHandler(mux, "/job/request", f.HandleNodeJobRequest)
 	f.AddNodeHandler(mux, "/job/status", f.HandleNodeJobUpdate)
+
 	f.AddClientHandler(mux, "/client/nodes/list", f.HandleClientNodeList)
+	f.AddClientHandler(mux, "/client/nodes/shutdown", f.HandleClientNodeShutdown)
+
 	f.AddClientHandler(mux, "/client/job/list", f.HandleClientJobList)
 	f.AddClientHandler(mux, "/client/job/new", f.HandleClientJobNew)
 	f.AddClientHandler(mux, "/client/job/clear", f.HandleClientJobClear)
 	f.AddClientHandler(mux, "/client/job/state", f.HandleClientJobState)
+
 	f.AddClientHandler(mux, "/client/shutdown", f.HandleClientShutdown)
 
 	tlsConfig, err := fuq.SetupTLS(f.Config)
