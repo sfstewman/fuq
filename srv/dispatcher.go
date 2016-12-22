@@ -52,16 +52,16 @@ var statusBuckets map[fuq.JobStatus][]byte = map[fuq.JobStatus][]byte{
 }
 
 type Dispatcher struct {
-	db     *bolt.DB
-	Config fuq.Config
+	db *bolt.DB
+	// Config fuq.Config
 	// Queue Queue
 }
 
-func NewDispatcher(config fuq.Config) (*Dispatcher, error) {
-	db, err := bolt.Open(config.DbPath, 0666, nil)
+func NewDispatcher(dbpath string) (*Dispatcher, error) {
+	db, err := bolt.Open(dbpath, 0666, nil)
 	if err != nil {
 		return nil, fmt.Errorf("error opening database '%s': %v",
-			config.DbPath, err)
+			dbpath, err)
 	}
 
 	if err := createSchema(db); err != nil {
@@ -69,8 +69,7 @@ func NewDispatcher(config fuq.Config) (*Dispatcher, error) {
 	}
 
 	d := Dispatcher{
-		db:     db,
-		Config: config,
+		db: db,
 	}
 	return &d, nil
 }
@@ -82,13 +81,6 @@ func (d *Dispatcher) Close() error {
 	err := d.db.Close()
 	d.db = nil
 	return err
-}
-
-func (d *Dispatcher) CheckAuth(hi fuq.Hello) error {
-	if d.Config.CheckAuth(hi.Auth) {
-		return nil
-	}
-	return errors.New("invalid credentials")
 }
 
 func isNameRegistered(names *bolt.Bucket, name string) bool {

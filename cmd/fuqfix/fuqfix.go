@@ -2,15 +2,12 @@ package main
 
 import (
 	"flag"
-	"github.com/sfstewman/fuq"
 	"github.com/sfstewman/fuq/srv"
 	"log"
 )
 
 func fixupDatabase(dbPath string) error {
-	cfg := fuq.Config{DbPath: dbPath}
-
-	d, err := srv.NewDispatcher(cfg)
+	d, err := srv.NewDispatcher(dbPath)
 	if err != nil {
 		return err
 	}

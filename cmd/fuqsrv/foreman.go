@@ -22,6 +22,8 @@ type Foreman struct {
 		shutdownHost map[string]struct{}
 	}
 
+	Config fuq.Config
+
 	jobsSignal struct {
 		mu   sync.Mutex
 		cond *sync.Cond
@@ -30,12 +32,13 @@ type Foreman struct {
 }
 
 func NewForeman(config fuq.Config, done chan<- struct{}) (*Foreman, error) {
-	d, err := srv.NewDispatcher(config)
+	d, err := srv.NewDispatcher(config.DbPath)
 	if err != nil {
 		return nil, err
 	}
 
 	f := Foreman{
+		Config:     config,
 		Dispatcher: d,
 		Done:       done,
 	}
