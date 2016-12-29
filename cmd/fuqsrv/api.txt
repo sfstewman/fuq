@@ -1,0 +1,355 @@
+/* API:
+ *
+ * The API is entirely json.
+ *
+ * Worker API
+ *
+ * HELLO: register worker with queue
+ *
+ *	POST /hello			*done*
+ *	{
+ *	 	"auth" : password,
+ *		"node" : node_name,
+ *		"nproc" : number_of_processors,
+ *	}
+ *
+ *	Success:
+ *	{
+ *		"name" : unique_name,
+ *		"cookie" : cookie,
+ *	}
+ *
+ *	Failure:
+ *	Returns http error code.
+ *
+ * REQUEST: request new jobs		*done*
+ *
+ *	POST /job/request
+ *	{
+ *		"cookie" : cookie,
+ *		"msg" : {
+ *			"nproc"  : number_of_procs,
+ *		},
+ *	}
+ *	Note: nproc is optional, and if omitted will default to 1.
+ *
+ *	(if absent, defaults to 1)
+ *
+ *	Success:
+ *	[ job_info1, job_info2, ..., job_infoN ]
+ *
+ *	where job_infoX:
+ *	{
+ *		"job_id" : unique_job_identifier,
+ *		"name" : job_name,
+ *		"task" : task_number,
+ *		"working_dir" : job_working_directory,
+ *		"command" : job_command,
+ *	}
+ *
+ *	Failure:
+ *	http error code
+ *
+ * STATUS: update job status		*done*
+ *
+ *	POST /job/status
+ *	{
+ *		"cookie" : cookie,
+ *		"msg" : {
+ *			"job_id" : unique_job_identifier,
+ *			"task" : task_id,
+ *			"success" : true or false,
+ *			"status" : job_status,
+ *			"newjob" : {	# newjob is optional
+ *				"nproc"  : number_of_procs,
+ *					(if absent, defaults to 1)
+ *			}
+ *		}
+ *	}
+ *
+ *	where job_status can be: "done" (if "success" is true) or a
+ *	description of the error (if possible).
+ *
+ *	Success:
+ *	If newjob exists, returns the same as REQUEST
+ *	otherwise, returns http success code.
+ *
+ *
+ * Client API:
+ *
+ * All client calls have an authentication entry:
+ *
+ *	{
+ *		"auth" : {
+ *	 		"password" : password,
+ *	 		"client" : client_identifier,
+ *		}
+ *	}
+ *
+ *	The actual part that varies from call to call is
+ *	in the "msg" part.
+ *
+ * NODE LIST: list nodes
+ *	POST /client/nodes/list
+ *	{
+ *		"auth" : <client_auth>,
+ *		"msg"  : {
+ *			"tags" : <list of tag strings>,
+ *		},
+ *	}
+ *
+ *	The "msg" part is optional.  Tags are user-defined strings that
+ *	can identify one of more nodes.
+ *
+ *	Success:
+ *	[ node_info1, node_info2, ..., node_infoN ]
+ *
+ *	where node_infoX is
+ *	{
+ *		"node" : node_name,
+ *		"uniq_name" : unique_node_name,
+ *		"nproc" : number_of_processors,
+ *	}
+ *
+ * NODE SHUTDOWN: tells a node to shut down when it's finished running
+ * its current job
+ *	POST /client/nodes/shutdown
+ *	{
+ *		"auth" : <client_auth>,
+ *		"msg"  : {
+ *			"uniq_names" : <list of node uniq names>,
+ *		},
+ *	}
+ *
+ *	Success:
+ *	HTTP success code
+ *
+ *	Failure:
+ *	HTTP error code
+ *
+ * JOB LIST: list jobs			*done*
+ *
+ *	POST /client/job/list
+ *	(note that all fields are optional)
+ *	{
+ *		"auth" : <client_auth>,
+ *		"msg" : {
+ *			"queue" : queue_name,
+ *			"status" : < "pending", "running", "finished", "error" >,
+ *			"name" : job_name_or_glob,
+ *		}
+ *	}
+ *
+ *	Success:
+ *	[ job_info1, job_info2, ..., job_infoN ]
+ *
+ *	where job_infoX:
+ *	{
+ *		"name" : job_name,
+ *		"queue" : queue_name,
+ *		"working_dir" : job_working_directory,
+ *		"command" : job_command,
+ *		"num_tasks" : task_interval_list,
+ *		"status" : < "pending", "running", "finished", "error" >,
+ *	}
+ *
+ *	where task_interval_list is a list of integers.  A negative
+ *	integer must follow a positive integer, and indicates a
+ *	interval: ..., 3, -15, ...  indicates a range 3-17.
+ *
+ *	Failure:
+ *	HTTP error code
+ *
+ *
+ * JOB ADD: add jobs			*done*
+ *
+ *	POST /client/job/new
+ *	{
+ *		"auth" : <client_auth>,
+ *		"msg" : {
+ *			"name" : job_name,
+ *			"num_tasks" : number_of_tasks,
+ *			"working_dir" : job_working_directory,
+ *			"command" : job_command,
+ *		}
+ *	}
+ *
+ *	Success:
+ *	{ "job_id" : <job_id> }
+ *
+ *	Failure:
+ *	HTTP failure code
+ *
+ *
+ * CHANGE JOB STATE: Changes the job state.
+ *
+ * This holds, releases, or cancels a job.
+ *
+ *	POST /client/job/state
+ *	{
+ *		"auth" : <client_auth>,
+ *		"msg" : {
+ *			"action" : <hold_release_or_cancel>,
+ *
+ *			"job_ids" : [ <job_id>, <job_id>, ... ],
+ *		    -or-
+ *			"job_names" : [ <job_name>, <job_name>, ... ],
+ *		},
+ *	}
+ *	NB: either job_ids or job_names can be given.  If both are given,
+ *	job_ids is used.
+ *
+ *	The action field can be "hold", "release", or "cancel".  This
+ *	will hold a job, release the job, or cancels the job.
+ *
+ *	A hold will prevent tasks from being dispatched for the job.  A
+ *	release will remove a hold on the job, allowing further tasks to
+ *	be queued.  A cancel will permanently remove the job from the
+ *	queue.
+ *
+ *	Success:
+ *	[state_change1, state_change2, ..., state_changeN]
+ *
+ *	where state_changeN:
+ *	{
+ *		"job_id" : <job_id>,
+ *		"prev_status" : <previous status>,
+ *		"new_status" : <new status>,
+ *	}
+ *
+ *
+ *	Failure:
+ *	HTTP failure code
+ *
+ *
+ * JOB MOVE: move job between queues
+ *
+ *	POST /client/job/move
+ *	{
+ *		"auth" : <client_auth>,
+ *		"msg" : {
+ *			"new_queue" : queue_name,
+ *
+ *			"job_id" : <job_id>,
+ *		    -or-
+ *			"job_name" : <job_name>,
+ *	}
+ *	NB: either job_id or name can be given.  If both are given,
+ *	job_id is used.
+ *
+ *	Success:
+ *	HTTP success code
+ *
+ *	Failure:
+ *	HTTP error code
+ *
+ *
+ * QUEUE LIST: list queues
+ *
+ *	POST /client/queue/list
+ *	{
+ *		"names" : <optional queue names>
+ *	}
+ *
+ *	Success:
+ *	[ queue_info1, queue_info2, ... ]
+ *
+ *	where queue_infoX is:
+ *	{
+ *		"name" : queue_name,
+ *		"status" : <running | empty | hold>,
+ *		"jobs" : [ job_name1, job_name2, ... ],
+ *	}
+ *
+ *	Failure:
+ *	http error code
+ *
+ * QUEUE ADD: add a new queue
+ *
+ *	POST /client/queue/list
+ *	{
+ *		"name" : queue_name,
+ *	}
+ *
+ *	Success:
+ *	http success code
+ *
+ *	Failure:
+ *	http error code
+ *
+ * QUEUE DELETE: add a new queue
+ *
+ *	POST /client/queue/delete
+ *	{
+ *		"name" : queue_name,
+ *	}
+ *
+ *	Success:
+ *	http success code
+ *
+ *	Failure:
+ *	http error code
+ *
+ * QUEUE HOLD: hold all jobs on queue
+ *
+ *	POST /client/queue/list
+ *	{
+ *		"name" : queue_name,
+ *	}
+ *
+ *	Success:
+ *	http success code
+ *
+ *	Failure:
+ *	http error code
+ *
+ * WORKER LIST: lists registered workers
+ *
+ *	POST /client/workers/list
+ *	{
+ *	}
+ *
+ *	Success:
+ *	[ worker_info1, worker_info2, ... ]
+ *
+ *	where worker_infoX is:
+ *	{
+ *		"name" : unique_name,
+ *		"node" : worker_node,
+ *	}
+ *
+ *	Failure:
+ *	http error code
+ *
+ * NODE ACTION: asks a registered worker to pause, resume, or stop
+ *
+ *	POST /client/node/stop
+ *	{
+ *		"auth" : <client_auth>,
+ *		"msg" : {
+ *			"name" : <unique_name>,
+ *		}
+ *	}
+ *
+ *	Success:
+ *	HTTP success code
+ *
+ *	Failure:
+ *	HTTP error code
+ *
+ * SHUTDOWN: shuts down fuq			*done*
+ *
+ *	POST /client/shutdown
+ *	{
+ *		"auth" : <client_auth>,
+ *	}
+ *
+ *	Success:
+ *	HTTP success code
+ *
+ *	Failure:
+ *	HTTP error code
+ *
+ */
+
+
