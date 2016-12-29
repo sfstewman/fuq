@@ -23,6 +23,23 @@ type JobDescription struct {
 	Status     JobStatus `json:"status"`
 }
 
+func (jd *JobDescription) ExpandPaths(pv *PathVars) {
+	jd.WorkingDir = ExpandPath(jd.WorkingDir, pv)
+	jd.LoggingDir = ExpandPath(jd.LoggingDir, pv)
+}
+
+func (jd *JobDescription) CheckPaths() error {
+	if jd.WorkingDir == "" {
+		return fmt.Errorf("invalid working directory '%s'", jd.WorkingDir)
+	}
+
+	if jd.LoggingDir == "" {
+		return fmt.Errorf("invalid logging directory '%s'", jd.LoggingDir)
+	}
+
+	return nil
+}
+
 type JobTaskStatus struct {
 	Description     JobDescription
 	TasksFinished   int   // Number of tasks that are finished.
@@ -53,6 +70,7 @@ func ReadJobFile(in io.Reader) (JobDescription, error) {
 
 		case "command":
 			job.Command = value
+
 		default:
 			return fmt.Errorf("unknown directive '%s'", key)
 		}

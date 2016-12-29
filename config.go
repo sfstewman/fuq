@@ -190,22 +190,74 @@ func DefaultSystemConfigPath() string {
 	return filepath.Join(u.HomeDir, DefaultConfigPath, DefaultSystemConfigFile)
 }
 
-func ExpandHomeDir(p string) string {
-	// XXX: a bit of a hack to expand ~/ to the user's home directory
-	if p[0] == '~' && p[1] == filepath.Separator {
-		u, err := user.Current()
-		if err != nil {
-			return p
-		}
+type PathVars struct {
+	Current string
+	Home    string
+	Other   map[string]string
+}
 
-		return filepath.Join(u.HomeDir, p[2:])
+func NewPathVars(curr, home string) *PathVars {
+	return &PathVars{
+		Current: curr,
+		Home:    home,
+		Other:   make(map[string]string),
+	}
+}
+
+func SetupPaths() (*PathVars, error) {
+	var (
+		pv  PathVars
+		err error
+		u   *user.User
+	)
+
+	u, err = user.Current()
+	if err != nil {
+		return nil, err
+	}
+
+	pv.Home = u.HomeDir
+
+	pv.Current, err = os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+
+	pv.Other = make(map[string]string)
+
+	return &pv, nil
+}
+
+func ExpandHomeDir(p string, pv *PathVars) string {
+	// XXX: a bit of a hack to expand ~/ to the user's home directory
+	if p[0] == '~' && p[1] == filepath.Separator && pv.Home != "" {
+		return filepath.Join(pv.Home, p[2:])
 	}
 
 	return p
 }
 
-func ExpandPath(p0 string) string {
-	p := ExpandHomeDir(p0)
+func ExpandPath(p0 string, pv *PathVars) string {
+	// Make sure that this is portable - XXX
+	p := p0
+
+	switch {
+	case p == "":
+		return ""
+
+	case p == ".":
+		p = pv.Current
+
+	case len(p) <= 1:
+		/* nop */
+
+	case p[0] == '~' && p[1] == filepath.Separator:
+		p = filepath.Join(pv.Home, p[2:])
+	case p[0] == '@' && p[1] == filepath.Separator:
+		p = filepath.Join(pv.Current, p[2:])
+	}
+
+	// p := ExpandHomeDir(p0, pv)
 	absP, err := filepath.Abs(p)
 	if err != nil {
 		log.Printf("error finding absolute path of '%s'", p0)
@@ -247,7 +299,7 @@ func ParseKVFile(in io.Reader, kvFunc func(key, value string) error) error {
 	return nil
 }
 
-func (c *Config) ReadConfig(fname string) error {
+func (c *Config) ReadConfig(fname string, pv *PathVars) error {
 	f, err := os.Open(fname)
 	if err != nil {
 		return err
@@ -258,12 +310,12 @@ func (c *Config) ReadConfig(fname string) error {
 		switch key {
 		case "dbpath":
 			if c.DbPath == "" {
-				c.DbPath = ExpandPath(value)
+				c.DbPath = ExpandPath(value, pv)
 			}
 
 		case "logdir":
 			if c.LogDir == "" {
-				c.LogDir = ExpandPath(value)
+				c.LogDir = ExpandPath(value, pv)
 			}
 
 		case "auth":
@@ -285,7 +337,7 @@ func (c *Config) ReadConfig(fname string) error {
 
 		case "foremanlog":
 			if c.ForemanLogFile == "" {
-				c.ForemanLogFile = ExpandPath(value)
+				c.ForemanLogFile = ExpandPath(value, pv)
 			}
 
 		case "key":
@@ -293,16 +345,17 @@ func (c *Config) ReadConfig(fname string) error {
 
 		case "keyfile":
 			if c.KeyFile == "" {
-				c.KeyFile = ExpandPath(value)
+				c.KeyFile = ExpandPath(value, pv)
 			}
+
 		case "certfile":
 			if c.CertFile == "" {
-				c.CertFile = ExpandPath(value)
+				c.CertFile = ExpandPath(value, pv)
 			}
 
 		case "rootca":
 			if c.RootCAFile == "" {
-				c.RootCAFile = ExpandPath(value)
+				c.RootCAFile = ExpandPath(value, pv)
 			}
 
 		case "certname":

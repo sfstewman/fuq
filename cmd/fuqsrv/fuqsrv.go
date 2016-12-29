@@ -892,6 +892,7 @@ func main() {
 		workerTag                    string
 		initialWait                  int
 		config                       fuq.Config
+		pv                           *fuq.PathVars
 		overwriteConfig              bool
 		numCPUs                      int
 		u                            *user.User
@@ -905,6 +906,11 @@ func main() {
 	hostname, err = os.Hostname()
 	if err != nil {
 		log.Printf("error retrieving hostname: %v", err)
+	}
+
+	pv, err = fuq.SetupPaths()
+	if err != nil {
+		log.Fatalf("error setting up paths: %v", err)
 	}
 
 	u, err = user.Current()
@@ -967,7 +973,7 @@ func main() {
 	}
 
 	if isForeman {
-		if err := config.ReadConfig(sysConfigFile); err != nil {
+		if err := config.ReadConfig(sysConfigFile, pv); err != nil {
 			// igore if the system configuration file does not exist
 			if !os.IsNotExist(err) {
 				log.Fatalf("error reading config file '%s': %v",
@@ -975,7 +981,7 @@ func main() {
 			}
 		}
 
-		if err := config.GenerateConfig(srvConfigFile, overwriteConfig); err != nil {
+		if err := config.GenerateConfigFile(srvConfigFile, pv, overwriteConfig); err != nil {
 			log.Fatalf("error generating config file '%s': %v",
 				srvConfigFile, err)
 		}
@@ -987,7 +993,7 @@ func main() {
 		config0 := config
 
 		for retries := 0; true; retries++ {
-			err := config.ReadConfig(srvConfigFile)
+			err := config.ReadConfig(srvConfigFile, pv)
 			if err == nil {
 				break
 			}
@@ -1004,7 +1010,7 @@ func main() {
 			config = config0
 		}
 
-		if err := config.ReadConfig(sysConfigFile); err != nil {
+		if err := config.ReadConfig(sysConfigFile, pv); err != nil {
 			// igore if the system configuration file does not exist
 			if !os.IsNotExist(err) {
 				log.Fatalf("error reading config file '%s': %v",

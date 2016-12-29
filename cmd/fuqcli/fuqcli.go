@@ -79,6 +79,12 @@ func queueCmd(cfg fuq.Config, args []string) error {
 		usage.ShowAndExit()
 	}
 
+	pv, err := fuq.SetupPaths()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error setting up paths: %v", err)
+		os.Exit(1)
+	}
+
 	if jobFile != "" {
 		f, err := os.Open(jobFile)
 		if err != nil {
@@ -113,17 +119,17 @@ func queueCmd(cfg fuq.Config, args []string) error {
 		job.Name = qArgs[0]
 		job.Command = qArgs[1]
 	}
-	wd := job.WorkingDir
-	job.WorkingDir = fuq.ExpandPath(wd)
-	if job.WorkingDir == "" {
-		fmt.Fprintf(os.Stderr, "invalid working directory (%s): %v", wd, err)
+
+	job.ExpandPaths(pv)
+	if err := job.CheckPaths(); err != nil {
+		fmt.Fprintf(os.Stderr, "error in job: %v", err)
 		usage.ShowAndExit()
 	}
 
-	ld := job.LoggingDir
-	job.LoggingDir = fuq.ExpandPath(ld)
-	if job.LoggingDir == "" {
-		fmt.Fprintf(os.Stderr, "invalid logging directory (%s): %v", wd, err)
+	cmd := job.Command
+	job.Command = fuq.ExpandPath(cmd, pv)
+	if job.Command == "" {
+		fmt.Fprintf(os.Stderr, "invalid command %s", cmd)
 		usage.ShowAndExit()
 	}
 
@@ -495,6 +501,12 @@ func main() {
 		usage.ShowAndExit()
 	}
 
+	pv, err := fuq.SetupPaths()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error setting up paths: %v", err)
+		os.Exit(1)
+	}
+
 	if globalSet.NArg() < 1 {
 		usage.ShowAndExit()
 	}
@@ -520,13 +532,13 @@ func main() {
 		}
 	}
 
-	if err := config.ReadConfig(sysConfigFile); err != nil {
+	if err := config.ReadConfig(sysConfigFile, pv); err != nil {
 		fmt.Fprintf(os.Stderr, "error reading config file '%s': %v\n",
 			sysConfigFile, err)
 		os.Exit(1)
 	}
 
-	if err := config.ReadConfig(srvConfigFile); err != nil {
+	if err := config.ReadConfig(srvConfigFile, pv); err != nil {
 		fmt.Fprintf(os.Stderr, "error reading config file '%s': %v\n",
 			srvConfigFile, err)
 		os.Exit(1)
