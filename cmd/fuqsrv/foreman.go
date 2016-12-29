@@ -12,7 +12,7 @@ import (
 )
 
 type Foreman struct {
-	*srv.Dispatcher
+	*srv.DbStore
 
 	// XXX: worth replacing with something that can scale?
 	// we need to lock the database with every request; should
@@ -32,15 +32,15 @@ type Foreman struct {
 }
 
 func NewForeman(config fuq.Config, done chan<- struct{}) (*Foreman, error) {
-	d, err := srv.NewDispatcher(config.DbPath)
+	d, err := srv.NewDbStore(config.DbPath)
 	if err != nil {
 		return nil, err
 	}
 
 	f := Foreman{
-		Config:     config,
-		Dispatcher: d,
-		Done:       done,
+		Config:  config,
+		DbStore: d,
+		Done:    done,
 	}
 
 	f.jobsSignal.cond = sync.NewCond(&f.jobsSignal.mu)

@@ -8,7 +8,7 @@ import (
 	"log"
 )
 
-func runFixups(tx *bolt.Tx, d *Dispatcher) error {
+func runFixups(tx *bolt.Tx, d *DbStore) error {
 	log.Println("Pass 1: Check job state consistency")
 
 	jb := tx.Bucket(jobBucket)
@@ -108,7 +108,7 @@ func runFixups(tx *bolt.Tx, d *Dispatcher) error {
 	return nil
 }
 
-func Fsck(d *Dispatcher) error {
+func Fsck(d *DbStore) error {
 	return d.db.Update(func(tx *bolt.Tx) error {
 		return runFixups(tx, d)
 	})

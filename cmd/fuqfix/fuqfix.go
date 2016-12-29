@@ -7,7 +7,7 @@ import (
 )
 
 func fixupDatabase(dbPath string) error {
-	d, err := srv.NewDispatcher(dbPath)
+	d, err := srv.NewDbStore(dbPath)
 	if err != nil {
 		return err
 	}
