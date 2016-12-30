@@ -127,7 +127,7 @@ func queueCmd(cfg fuq.Config, args []string) error {
 	}
 
 	cmd := job.Command
-	job.Command = fuq.ExpandPath(cmd, pv)
+	job.Command = pv.ExpandPath(cmd)
 	if job.Command == "" {
 		fmt.Fprintf(os.Stderr, "invalid command %s", cmd)
 		usage.ShowAndExit()

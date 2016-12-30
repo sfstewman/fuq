@@ -107,8 +107,6 @@ func TestJobStatusUnmarshalJSON(t *testing.T) {
 	for _, kvp := range table {
 		key, value := kvp.k, kvp.v
 		actual, found := out[kvp.k]
-		t.Logf("(%s,%v) expected, key found? %v  value is %v",
-			key, value, found, actual)
 		if !found {
 			t.Errorf("key '%s' not in map", key)
 			continue

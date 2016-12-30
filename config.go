@@ -259,7 +259,7 @@ func ExpandHomeDir(p string, pv *PathVars) string {
 	return p
 }
 
-func ExpandPath(p0 string, pv *PathVars) string {
+func (pv *PathVars) ExpandPath(p0 string) string {
 	// Make sure that this is portable - XXX
 	p := p0
 
@@ -332,12 +332,12 @@ func (c *Config) ReadConfig(fname string, pv *PathVars) error {
 		switch key {
 		case "dbpath":
 			if c.DbPath == "" {
-				c.DbPath = ExpandPath(value, pv)
+				c.DbPath = pv.ExpandPath(value)
 			}
 
 		case "logdir":
 			if c.LogDir == "" {
-				c.LogDir = ExpandPath(value, pv)
+				c.LogDir = pv.ExpandPath(value)
 			}
 
 		case "auth":
@@ -359,7 +359,7 @@ func (c *Config) ReadConfig(fname string, pv *PathVars) error {
 
 		case "foremanlog":
 			if c.ForemanLogFile == "" {
-				c.ForemanLogFile = ExpandPath(value, pv)
+				c.ForemanLogFile = pv.ExpandPath(value)
 			}
 
 		case "key":
@@ -367,17 +367,17 @@ func (c *Config) ReadConfig(fname string, pv *PathVars) error {
 
 		case "keyfile":
 			if c.KeyFile == "" {
-				c.KeyFile = ExpandPath(value, pv)
+				c.KeyFile = pv.ExpandPath(value)
 			}
 
 		case "certfile":
 			if c.CertFile == "" {
-				c.CertFile = ExpandPath(value, pv)
+				c.CertFile = pv.ExpandPath(value)
 			}
 
 		case "rootca":
 			if c.RootCAFile == "" {
-				c.RootCAFile = ExpandPath(value, pv)
+				c.RootCAFile = pv.ExpandPath(value)
 			}
 
 		case "certname":

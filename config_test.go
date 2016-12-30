@@ -1,6 +1,7 @@
 package fuq
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -43,5 +44,26 @@ last_key	81412
 	if pair != len(expected) {
 		t.Fatalf("expected %d kv pairs, but found %d",
 			len(expected), pair)
+	}
+}
+
+func TestExpandPath(t *testing.T) {
+	curr := "/foo/bar"
+	home := "/home/baz"
+
+	pv := NewPathVars(filepath.FromSlash(curr), filepath.FromSlash(home))
+
+	pathTests := []struct{ input, expected string }{
+		{"~/quux/readme.txt", "/home/baz/quux/readme.txt"},
+		{"@/data.db", "/foo/bar/data.db"},
+	}
+
+	for _, pair := range pathTests {
+		input := filepath.FromSlash(pair.input)
+		expected := filepath.FromSlash(pair.expected)
+		if p := pv.ExpandPath(input); p != expected {
+			t.Errorf("path '%s' expected to '%s' but expected '%s'",
+				input, p, expected)
+		}
 	}
 }

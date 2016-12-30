@@ -24,8 +24,8 @@ type JobDescription struct {
 }
 
 func (jd *JobDescription) ExpandPaths(pv *PathVars) {
-	jd.WorkingDir = ExpandPath(jd.WorkingDir, pv)
-	jd.LoggingDir = ExpandPath(jd.LoggingDir, pv)
+	jd.WorkingDir = pv.ExpandPath(jd.WorkingDir)
+	jd.LoggingDir = pv.ExpandPath(jd.LoggingDir)
 }
 
 func (jd *JobDescription) CheckPaths() error {
