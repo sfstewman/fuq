@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -12,6 +13,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -226,6 +228,10 @@ func NewPathVars(curr, home string) *PathVars {
 	}
 }
 
+func (pv *PathVars) Add(k, v string) {
+	pv.Other[k] = v
+}
+
 func SetupPaths() (*PathVars, error) {
 	var (
 		pv  PathVars
@@ -259,34 +265,159 @@ func ExpandHomeDir(p string, pv *PathVars) string {
 	return p
 }
 
-func (pv *PathVars) ExpandPath(p0 string) string {
-	// Make sure that this is portable - XXX
-	p := p0
+func PathToElements(p0 string) (vol string, path []string) {
+	vol = filepath.VolumeName(p0)
+	p := strings.TrimPrefix(p0, vol)
+	p = filepath.Clean(p)
 
-	switch {
-	case p == "":
-		return ""
+	for p != "" {
+		// fmt.Fprintf(os.Stderr, "p: %s\npath: %v\n", p, path)
+		p1, base := filepath.Split(p)
+		path = append(path, base)
+		p1 = filepath.Clean(p1)
+		if len(p1) == 1 && (p1[0] == filepath.Separator || p1[0] == '.') {
+			path = append(path, p1)
+			break
+		}
 
-	case p == ".":
-		p = pv.Current
-
-	case len(p) <= 1:
-		/* nop */
-
-	case p[0] == '~' && p[1] == filepath.Separator:
-		p = filepath.Join(pv.Home, p[2:])
-	case p[0] == '@' && p[1] == filepath.Separator:
-		p = filepath.Join(pv.Current, p[2:])
+		if p == p1 {
+			panic("p == p1")
+		}
+		p = p1
 	}
 
-	// p := ExpandHomeDir(p0, pv)
+	if len(path) <= 1 {
+		return
+	}
+
+	i := 0
+	j := len(path) - 1
+	for i < j {
+		path[i], path[j] = path[j], path[i]
+		i++
+		j--
+	}
+
+	// fmt.Fprintf(os.Stderr, "orig: %s\nvol: %s\npath: %v\n", p0, vol, path)
+
+	return
+}
+
+const (
+	evBare = iota
+	evDollar
+	evVar
+)
+
+func (pv *PathVars) expandVar(v string) (string, error) {
+	state := evBare
+	buf := bytes.Buffer{}
+
+	v0 := v
+scan_loop:
+	for {
+		// fmt.Printf("v0 = %s, v = %s, buf = %s\n", v0, v, &buf)
+		switch state {
+		case evBare:
+			i := strings.IndexRune(v, '$')
+			if i < 0 {
+				break scan_loop
+			}
+			buf.WriteString(v[:i])
+			v = v[i+1:]
+			state = evDollar
+
+		case evDollar:
+			if len(v) == 0 || v[0] != '{' {
+				buf.WriteRune('$')
+				// if double $, skip the second
+				if v[0] == '$' {
+					v = v[1:]
+				}
+				state = evBare
+				continue scan_loop
+			}
+			state = evVar
+			v = v[1:]
+
+		case evVar:
+			i := strings.IndexRune(v, '}')
+			if i < 0 {
+				return "", errors.New("unterminated variable (missing '}')")
+			}
+			vn := v[:i]
+			val, ok := pv.Other[vn]
+			if !ok {
+				return "", fmt.Errorf("unknown variable '%s'", vn)
+			}
+
+			buf.WriteString(val)
+			v = v[i+1:]
+
+			state = evBare
+		default:
+			panic("invalid state")
+		}
+	}
+
+	if v == v0 {
+		return v0, nil
+	}
+
+	buf.WriteString(v)
+	return buf.String(), nil
+}
+
+func (pv *PathVars) ExpandPath(p0 string) (string, error) {
+	// Make sure that this is portable - XXX
+	p := filepath.Clean(p0)
+	if p == "" {
+		return p, nil
+	}
+
+	if p == "." {
+		return pv.Current, nil
+	}
+
+	_, elts := PathToElements(p)
+	if len(elts) == 0 || (len(elts) == 1 && elts[0] == ".") {
+		return p, nil
+	}
+
+	for i, e0 := range elts {
+		e, err := pv.expandVar(e0)
+		if err != nil {
+			return "", err
+		}
+
+		if e != e0 {
+			elts[i] = e
+		}
+	}
+
+	if elts[0] == "." {
+		elts = elts[1:]
+	}
+
+	p = filepath.Join(elts...)
+
+	if len(p) > 1 {
+		if p[0] == '~' && p[1] == filepath.Separator {
+			p = filepath.Join(pv.Home, p[2:])
+		}
+
+		if p[0] == '@' && p[1] == filepath.Separator {
+			p = filepath.Join(pv.Current, p[2:])
+		}
+	}
+
 	absP, err := filepath.Abs(p)
 	if err != nil {
 		log.Printf("error finding absolute path of '%s'", p0)
-		return ""
+		return "", err
 	}
 
-	return absP
+	return absP, nil
 }
 
 func ParseKVFile(in io.Reader, kvFunc func(key, value string) error) error {
@@ -329,16 +460,33 @@ func (c *Config) ReadConfig(fname string, pv *PathVars) error {
 	defer f.Close()
 
 	return ParseKVFile(f, func(key, value string) error {
-		switch key {
-		case "dbpath":
-			if c.DbPath == "" {
-				c.DbPath = pv.ExpandPath(value)
+		var err error
+
+		setupPath := func(k, v0 string) string {
+			var v string
+
+			if err != nil {
+				return ""
 			}
 
-		case "logdir":
-			if c.LogDir == "" {
-				c.LogDir = pv.ExpandPath(value)
+			if k != "" {
+				return k
 			}
+
+			if v, err = pv.ExpandPath(v0); err != nil {
+				err = fmt.Errorf("error with key '%s': error expanding path '%s'",
+					k, v0)
+			}
+
+			return v
+		}
+
+		switch key {
+		case "dbpath":
+			c.DbPath = setupPath(c.DbPath, value)
+
+		case "logdir":
+			c.LogDir = setupPath(c.LogDir, value)
 
 		case "auth":
 			c.Auth = value
@@ -358,27 +506,19 @@ func (c *Config) ReadConfig(fname string, pv *PathVars) error {
 			}
 
 		case "foremanlog":
-			if c.ForemanLogFile == "" {
-				c.ForemanLogFile = pv.ExpandPath(value)
-			}
+			c.ForemanLogFile = setupPath(c.ForemanLogFile, value)
 
 		case "key":
 			// skip for now
 
 		case "keyfile":
-			if c.KeyFile == "" {
-				c.KeyFile = pv.ExpandPath(value)
-			}
+			c.KeyFile = setupPath(c.KeyFile, value)
 
 		case "certfile":
-			if c.CertFile == "" {
-				c.CertFile = pv.ExpandPath(value)
-			}
+			c.CertFile = setupPath(c.CertFile, value)
 
 		case "rootca":
-			if c.RootCAFile == "" {
-				c.RootCAFile = pv.ExpandPath(value)
-			}
+			c.RootCAFile = setupPath(c.RootCAFile, value)
 
 		case "certname":
 			if c.CertName == "" {

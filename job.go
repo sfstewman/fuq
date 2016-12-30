@@ -23,9 +23,17 @@ type JobDescription struct {
 	Status     JobStatus `json:"status"`
 }
 
-func (jd *JobDescription) ExpandPaths(pv *PathVars) {
-	jd.WorkingDir = pv.ExpandPath(jd.WorkingDir)
-	jd.LoggingDir = pv.ExpandPath(jd.LoggingDir)
+func (jd *JobDescription) ExpandPaths(pv *PathVars) error {
+	var err error
+	if jd.WorkingDir, err = pv.ExpandPath(jd.WorkingDir); err != nil {
+		return err
+	}
+
+	if jd.LoggingDir, err = pv.ExpandPath(jd.LoggingDir); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (jd *JobDescription) CheckPaths() error {

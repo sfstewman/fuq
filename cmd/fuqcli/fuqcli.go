@@ -120,14 +120,22 @@ func queueCmd(cfg fuq.Config, args []string) error {
 		job.Command = qArgs[1]
 	}
 
-	job.ExpandPaths(pv)
+	if err := job.ExpandPaths(pv); err != nil {
+		fmt.Fprintf(os.Stderr, "error in job: %v", err)
+		usage.ShowAndExit()
+	}
+
 	if err := job.CheckPaths(); err != nil {
 		fmt.Fprintf(os.Stderr, "error in job: %v", err)
 		usage.ShowAndExit()
 	}
 
 	cmd := job.Command
-	job.Command = pv.ExpandPath(cmd)
+	if job.Command, err = pv.ExpandPath(cmd); err != nil {
+		fmt.Fprintf(os.Stderr, "error expanding command '%s': %v", cmd, err)
+		os.Exit(1)
+	}
+
 	if job.Command == "" {
 		fmt.Fprintf(os.Stderr, "invalid command %s", cmd)
 		usage.ShowAndExit()
