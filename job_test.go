@@ -22,28 +22,18 @@ command /bin/echo	# another comment
 		t.Fatalf("error reading job file: %v", err)
 	}
 
-	if jd.Name != "FooBar" {
-		t.Error("wrong name, expected \"FooBar\", found: %s", jd.Name)
-	}
-
 	if jd.NumTasks != 23 {
 		t.Error("wrong number of tasks, expected 23, found: %d", jd.NumTasks)
 	}
 
-	if jd.WorkingDir != "~/sims/FooBar" {
-		t.Error("wrong working directory, expected '~/sims/FooBar', found: %s",
-			jd.WorkingDir)
+	strCmpTable := stringCompareTable{
+		{jd.Name, "FooBar", "name"},
+		{jd.WorkingDir, "~/sims/FooBar", "working directory"},
+		{jd.LoggingDir, "~/sims/FooBar/logs", "logging directory"},
+		{jd.Command, "/bin/echo", "command"},
 	}
 
-	if jd.LoggingDir != "~/sims/FooBar/logs" {
-		t.Error("wrong logging directory, expected '~/sims/FooBar/logs', found: %s",
-			jd.LoggingDir)
-	}
-
-	if jd.Command != "/bin/echo" {
-		t.Error("wrong command, expected '/bin/echo', found: %s",
-			jd.Command)
-	}
+	strCmpTable.Check(t)
 }
 
 func TestJobStatusMarshalJSON(t *testing.T) {

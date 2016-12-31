@@ -52,8 +52,6 @@ func TestPathToElements(t *testing.T) {
 
 	testElementsEqual := func(p, vol string, expected ...string) {
 		v, elts := PathToElements(p)
-		// v := ""
-		// elts := []string{"lol", "wtf"}
 		if v != vol {
 			t.Errorf("path '%s' should have volume '%s' but found '%s'",
 				p, vol, v)
@@ -68,18 +66,51 @@ func TestPathToElements(t *testing.T) {
 
 		for i, e := range expected {
 			if elts[i] != e {
-				t.Errorf("path '%s' element %d shoudl be '%s' but was '%s'",
+				t.Errorf("path '%s' element %d should be '%s' but was '%s'",
 					p, i, e, elts[i])
 				return
 			}
 		}
 	}
 
-	testElementsEqual("/foo/bar/baz", "", "/", "foo", "bar", "baz")
-	testElementsEqual("/foo/bar/../baz", "", "/", "foo", "baz")
-	testElementsEqual("@/test/data.txt", "", ".", "@", "test", "data.txt")
-	testElementsEqual("~/test/more_data.txt", "", ".", "~", "test", "more_data.txt")
-	testElementsEqual("~/${var}/more_data.txt", "", ".", "~", "${var}", "more_data.txt")
+	vol := ""
+	testElementsEqual("/foo/bar/baz", vol, "/", "foo", "bar", "baz")
+	testElementsEqual("/foo/bar/../baz", vol, "/", "foo", "baz")
+	testElementsEqual("@/test/data.txt", vol, ".", "@", "test", "data.txt")
+	testElementsEqual("~/test/more_data.txt", vol, ".", "~", "test", "more_data.txt")
+	testElementsEqual("~/${var}/more_data.txt", vol, ".", "~", "${var}", "more_data.txt")
+}
+
+type stringCompareTable []struct{ actual, expected, desc string }
+
+func (tbl stringCompareTable) Check(t *testing.T) {
+	for _, itm := range tbl {
+		if itm.actual != itm.expected {
+			if itm.desc != "" {
+				t.Errorf("wrong %s, expected %q, actual %q",
+					itm.desc, itm.expected, itm.actual)
+			} else {
+				t.Errorf("error: expected %q, actual %q",
+					itm.expected, itm.actual)
+			}
+		}
+	}
+}
+
+func checkPath(t *testing.T, pv *PathVars, input, expected string) {
+	input = filepath.FromSlash(input)
+	expected = filepath.FromSlash(expected)
+	p, err := pv.ExpandPath(input)
+	if err != nil {
+		t.Fatalf("error expanding path '%s': %v", input, err)
+	}
+
+	if p != expected {
+		t.Errorf("path '%s' expected to '%s' but expected '%s'",
+			input, p, expected)
+	}
+
+	t.Logf("expanded '%s' -> '%s'", input, p)
 }
 
 func TestExpandPath(t *testing.T) {
@@ -90,28 +121,10 @@ func TestExpandPath(t *testing.T) {
 	pv.Add("ARCH", "amd64")
 	pv.Add("OS", "darwin")
 
-	pathTests := []struct{ input, expected string }{
-		{"~/quux/readme.txt", "/home/baz/quux/readme.txt"},
-		{"@/data.db", "/foo/bar/data.db"},
-		{"@/data/${OS}/asset.txt", "/foo/bar/data/darwin/asset.txt"},
-		{"@/data/${OS}_${ARCH}/asset.txt", "/foo/bar/data/darwin_amd64/asset.txt"},
-	}
-
-	for _, pair := range pathTests {
-		input := filepath.FromSlash(pair.input)
-		expected := filepath.FromSlash(pair.expected)
-		p, err := pv.ExpandPath(input)
-		if err != nil {
-			t.Fatalf("error expanding path '%s': %v", input, err)
-		}
-
-		if p != expected {
-			t.Errorf("path '%s' expected to '%s' but expected '%s'",
-				input, p, expected)
-		}
-
-		t.Logf("expanded '%s' -> '%s'", input, p)
-	}
+	checkPath(t, pv, "~/quux/readme.txt", "/home/baz/quux/readme.txt")
+	checkPath(t, pv, "@/data.db", "/foo/bar/data.db")
+	checkPath(t, pv, "@/data/${OS}/asset.txt", "/foo/bar/data/darwin/asset.txt")
+	checkPath(t, pv, "@/data/${OS}_${ARCH}/asset.txt", "/foo/bar/data/darwin_amd64/asset.txt")
 }
 
 func TestReadConfig(t *testing.T) {
@@ -144,7 +157,7 @@ certname	frankie-valentine
 		t.Errorf("wrong port, expected %d but found %d", 13247, cfg.Port)
 	}
 
-	strCmpTable := []struct{ actual, expected, desc string }{
+	strCmpTable := stringCompareTable{
 		{cfg.DbPath, "/path/to/db/queue.db", "config path"},
 		{cfg.LogDir, "/home/baz/.fuq/logs", "log directory"},
 		{cfg.Auth, "NeedABetterPassword", "auth string"},
@@ -156,10 +169,5 @@ certname	frankie-valentine
 		{cfg.CertName, "frankie-valentine", "cert name"},
 	}
 
-	for _, itm := range strCmpTable {
-		if itm.actual != itm.expected {
-			t.Errorf("wrong %s, expected %q, actual %q",
-				itm.desc, itm.expected, itm.actual)
-		}
-	}
+	strCmpTable.Check(t)
 }
