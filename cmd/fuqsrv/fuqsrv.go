@@ -619,7 +619,7 @@ func main() {
 	}
 
 	if isForeman {
-		if err := config.ReadConfig(sysConfigFile, pv); err != nil {
+		if err := config.ReadConfigFile(sysConfigFile, pv); err != nil {
 			// igore if the system configuration file does not exist
 			if !os.IsNotExist(err) {
 				log.Fatalf("error reading config file '%s': %v",
@@ -639,7 +639,7 @@ func main() {
 		config0 := config
 
 		for retries := 0; true; retries++ {
-			err := config.ReadConfig(srvConfigFile, pv)
+			err := config.ReadConfigFile(srvConfigFile, pv)
 			if err == nil {
 				break
 			}
@@ -656,7 +656,7 @@ func main() {
 			config = config0
 		}
 
-		if err := config.ReadConfig(sysConfigFile, pv); err != nil {
+		if err := config.ReadConfigFile(sysConfigFile, pv); err != nil {
 			// igore if the system configuration file does not exist
 			if !os.IsNotExist(err) {
 				log.Fatalf("error reading config file '%s': %v",

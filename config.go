@@ -128,7 +128,7 @@ func (c *Config) GenerateConfigFile(fname string, pv *PathVars, overwrite bool) 
 	f, err := os.OpenFile(fname, flags, CfgFilePerms)
 	if err != nil {
 		if os.IsExist(err) && !overwrite {
-			return c.ReadConfig(fname, pv)
+			return c.ReadConfigFile(fname, pv)
 		}
 
 		if !os.IsNotExist(err) {
@@ -254,15 +254,6 @@ func SetupPaths() (*PathVars, error) {
 	pv.Other = make(map[string]string)
 
 	return &pv, nil
-}
-
-func ExpandHomeDir(p string, pv *PathVars) string {
-	// XXX: a bit of a hack to expand ~/ to the user's home directory
-	if p[0] == '~' && p[1] == filepath.Separator && pv.Home != "" {
-		return filepath.Join(pv.Home, p[2:])
-	}
-
-	return p
 }
 
 func PathToElements(p0 string) (vol string, path []string) {
@@ -452,14 +443,18 @@ func ParseKVFile(in io.Reader, kvFunc func(key, value string) error) error {
 	return nil
 }
 
-func (c *Config) ReadConfig(fname string, pv *PathVars) error {
+func (c *Config) ReadConfigFile(fname string, pv *PathVars) error {
 	f, err := os.Open(fname)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
-	return ParseKVFile(f, func(key, value string) error {
+	return c.ReadConfig(f, pv)
+}
+
+func (c *Config) ReadConfig(r io.Reader, pv *PathVars) error {
+	return ParseKVFile(r, func(key, value string) error {
 		var err error
 
 		setupPath := func(k, v0 string) string {

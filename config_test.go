@@ -113,3 +113,53 @@ func TestExpandPath(t *testing.T) {
 		t.Logf("expanded '%s' -> '%s'", input, p)
 	}
 }
+
+func TestReadConfig(t *testing.T) {
+	curr := "/foo/bar"
+	home := "/home/baz"
+
+	pv := NewPathVars(filepath.FromSlash(curr), filepath.FromSlash(home))
+	pv.Add("ARCH", "amd64")
+	pv.Add("OS", "darwin")
+
+	input := strings.NewReader(`# First line is a comment
+dbpath		/path/to/db/queue.db
+logdir		~/.fuq/logs
+auth		NeedABetterPassword
+port		13247
+foreman		apollo-13.local
+foremanlog	~/.fuq/srv.log
+keyfile		~/.fuq/key.pem
+certfile	~/.fuq/cert.pem
+rootca 		~/.fuq/ca.pem
+certname	frankie-valentine
+`)
+
+	cfg := Config{}
+	if err := cfg.ReadConfig(input, pv); err != nil {
+		t.Fatalf("error reading configuration: %v", err)
+	}
+
+	if cfg.Port != 13247 {
+		t.Errorf("wrong port, expected %d but found %d", 13247, cfg.Port)
+	}
+
+	strCmpTable := []struct{ actual, expected, desc string }{
+		{cfg.DbPath, "/path/to/db/queue.db", "config path"},
+		{cfg.LogDir, "/home/baz/.fuq/logs", "log directory"},
+		{cfg.Auth, "NeedABetterPassword", "auth string"},
+		{cfg.Foreman, "apollo-13.local", "foreman host"},
+		{cfg.ForemanLogFile, "/home/baz/.fuq/srv.log", "foreman log file"},
+		{cfg.KeyFile, "/home/baz/.fuq/key.pem", "key file"},
+		{cfg.CertFile, "/home/baz/.fuq/cert.pem", "cert file"},
+		{cfg.RootCAFile, "/home/baz/.fuq/ca.pem", "root ca file"},
+		{cfg.CertName, "frankie-valentine", "cert name"},
+	}
+
+	for _, itm := range strCmpTable {
+		if itm.actual != itm.expected {
+			t.Errorf("wrong %s, expected %q, actual %q",
+				itm.desc, itm.expected, itm.actual)
+		}
+	}
+}

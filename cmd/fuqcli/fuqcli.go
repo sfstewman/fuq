@@ -540,13 +540,13 @@ func main() {
 		}
 	}
 
-	if err := config.ReadConfig(sysConfigFile, pv); err != nil {
+	if err := config.ReadConfigFile(sysConfigFile, pv); err != nil {
 		fmt.Fprintf(os.Stderr, "error reading config file '%s': %v\n",
 			sysConfigFile, err)
 		os.Exit(1)
 	}
 
-	if err := config.ReadConfig(srvConfigFile, pv); err != nil {
+	if err := config.ReadConfigFile(srvConfigFile, pv); err != nil {
 		fmt.Fprintf(os.Stderr, "error reading config file '%s': %v\n",
 			srvConfigFile, err)
 		os.Exit(1)
