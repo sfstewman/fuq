@@ -2,8 +2,6 @@ package srv
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -51,10 +49,30 @@ var statusBuckets map[fuq.JobStatus][]byte = map[fuq.JobStatus][]byte{
 	fuq.Cancelled: jobCancelledBucket,
 }
 
+type JobQueuer interface {
+	Close() error
+	ClearJobs() error
+	AllJobs() ([]fuq.JobDescription, error)
+	FetchJobs(name, status string) ([]fuq.JobDescription, error)
+	ChangeJobState(jobId fuq.JobId, newState fuq.JobStatus) (fuq.JobStatus, error)
+	AddJob(job fuq.JobDescription) (fuq.JobId, error)
+	UpdateTaskStatus(update fuq.JobStatusUpdate) error
+	FetchJobTaskStatus(jobId fuq.JobId) (fuq.JobTaskStatus, error)
+	FetchPendingTasks(nproc int) ([]fuq.Task, error)
+}
+
 type DbStore struct {
 	db *bolt.DB
-	// Config fuq.Config
-	// Queue Queue
+}
+
+var _ JobQueuer = (*DbStore)(nil)
+
+type Jobs struct {
+	store *DbStore
+}
+
+func (d *DbStore) Jobs() Jobs {
+	return Jobs{store: d}
 }
 
 func NewDbStore(dbpath string) (*DbStore, error) {
@@ -81,266 +99,6 @@ func (d *DbStore) Close() error {
 	err := d.db.Close()
 	d.db = nil
 	return err
-}
-
-func isNameRegistered(names *bolt.Bucket, name string) bool {
-	exists := names.Get([]byte(name))
-	return exists != nil
-}
-
-func addUniqueName(names *bolt.Bucket, name string) error {
-	return names.Put([]byte(name), []byte{})
-}
-
-func uniquifyName(names *bolt.Bucket, name string) (string, error) {
-	for i := uint(1); i > 0; i++ {
-		attempt := fmt.Sprintf("%s:%d", name, i)
-		if !isNameRegistered(names, attempt) {
-			err := addUniqueName(names, attempt)
-			return attempt, err
-		}
-	}
-
-	log.Panicf("could not uniquify name '%s'", name)
-
-	// should not reach
-	return "", nil
-}
-
-func generateCookie(cookies *bolt.Bucket, ni fuq.NodeInfo) (fuq.Cookie, error) {
-	raw := make([]byte, CookieSeqNumBytes)
-	hashed := make([]byte, base64.RawStdEncoding.EncodedLen(len(raw)))
-
-	for {
-		if _, err := rand.Read(raw[:]); err != nil {
-			return "", fmt.Errorf("error generating cookie: %v", err)
-		}
-
-		base64.RawStdEncoding.Encode(hashed, raw)
-		log.Printf("node %s: raw is %v, cookie is %s", ni.Node, raw, hashed)
-
-		if exists := cookies.Get(hashed); exists == nil {
-			break
-		}
-		log.Printf("retrying")
-	}
-
-	cookie := fuq.Cookie(hashed)
-	b, err := msgpack.Marshal(&ni)
-	if err != nil {
-		return "", err
-	}
-
-	if err := cookies.Put(hashed, b); err != nil {
-		return "", err
-	}
-
-	return cookie, nil
-}
-
-func (d *DbStore) MakeCookie(ni fuq.NodeInfo) (fuq.Cookie, error) {
-	var cookie fuq.Cookie
-
-	err := d.db.Update(func(tx *bolt.Tx) error {
-		var names, cookies *bolt.Bucket
-		var err error
-
-		names = tx.Bucket(namesBucket)
-
-		if ni.UniqName == "" || ni.UniqName == ni.Node || isNameRegistered(names, ni.UniqName) {
-			ni.UniqName, err = uniquifyName(names, ni.Node)
-			if err != nil {
-				return err
-			}
-		}
-
-		cookies = tx.Bucket(cookieBucket)
-		cookie, err = generateCookie(cookies, ni)
-		if err != nil {
-			return err
-		}
-
-		return nil
-	})
-
-	return cookie, err
-}
-
-func (d *DbStore) RegenerateCookie(ni fuq.NodeInfo) (fuq.Cookie, error) {
-	var cookie fuq.Cookie
-
-	if ni.UniqName == "" || ni.UniqName == ni.Node {
-		return cookie, errors.New("invalid unique name")
-	}
-
-	err := d.db.Update(func(tx *bolt.Tx) error {
-		var names, cookies *bolt.Bucket
-		var err error
-
-		names = tx.Bucket(namesBucket)
-
-		if !isNameRegistered(names, ni.UniqName) {
-			addUniqueName(names, ni.UniqName)
-		}
-
-		cookies = tx.Bucket(cookieBucket)
-		cookie, err = generateCookie(cookies, ni)
-		if err != nil {
-			return err
-		}
-
-		return nil
-	})
-
-	return cookie, err
-}
-
-func (d *DbStore) ExpireCookie(cookie fuq.Cookie) error {
-	bc := []byte(cookie)
-
-	err := d.db.Update(func(tx *bolt.Tx) error {
-		cookies := tx.Bucket(cookieBucket)
-		curs := cookies.Cursor()
-		k, _ := curs.Seek(bc)
-		if !bytes.Equal(k, bc) {
-			return nil
-		}
-
-		if err := curs.Delete(); err != nil {
-			return fmt.Errorf("error deleting cookie '%s': %v",
-				cookie, err)
-		}
-
-		return nil
-	})
-
-	return err
-}
-
-func (d *DbStore) Lookup(cookie fuq.Cookie) (fuq.NodeInfo, error) {
-	ni := fuq.NodeInfo{}
-	err := d.db.View(func(tx *bolt.Tx) error {
-		cookies := tx.Bucket(cookieBucket)
-		if cookies == nil {
-			return nil
-		}
-
-		log.Printf("looking up cookie '%s'", cookie)
-		v := cookies.Get([]byte(cookie))
-		if v == nil {
-			return nil
-		}
-
-		if err := msgpack.Unmarshal(v, &ni); err != nil {
-			return err
-		}
-		log.Printf("found node '%s'", ni.UniqName)
-
-		return nil
-	})
-
-	return ni, err
-}
-
-// Note: tags are not indexed, so this requires a full scan of all
-// nodes.  This should be fine unless the number of nodes gets pretty
-// large.  At that point, we should add an index.
-func (d *DbStore) NodesWithTag(tag string) ([]fuq.NodeInfo, error) {
-	var nodes []fuq.NodeInfo = nil
-
-	err := d.db.View(func(tx *bolt.Tx) error {
-		cookies := tx.Bucket(cookieBucket)
-		n := cookies.Stats().KeyN
-		nodes = make([]fuq.NodeInfo, 0, n)
-
-		err := cookies.ForEach(func(k, v []byte) error {
-			ni := fuq.NodeInfo{}
-			err := msgpack.Unmarshal(v, &ni)
-			if err != nil {
-				return err
-			}
-
-			// linear scan... we can do better here
-			for _, t := range ni.Tags {
-				if t == tag {
-					nodes = append(nodes, ni)
-					return nil
-				}
-			}
-
-			return nil
-		})
-
-		return err
-	})
-
-	return nodes, err
-}
-
-func (d *DbStore) AllNodes() ([]fuq.NodeInfo, error) {
-	var nodes []fuq.NodeInfo = nil
-
-	err := d.db.View(func(tx *bolt.Tx) error {
-		cookies := tx.Bucket(cookieBucket)
-		n := cookies.Stats().KeyN
-		nodes = make([]fuq.NodeInfo, 0, n)
-
-		err := cookies.ForEach(func(k, v []byte) error {
-			ni := fuq.NodeInfo{}
-			err := msgpack.Unmarshal(v, &ni)
-			if err == nil {
-				nodes = append(nodes, ni)
-			}
-			return err
-		})
-
-		return err
-	})
-
-	return nodes, err
-}
-
-func txRecreateBucket(tx *bolt.Tx, n []byte) (*bolt.Bucket, error) {
-	if tx.Bucket(n) != nil {
-		if err := tx.DeleteBucket(n); err != nil {
-			return nil, fmt.Errorf("error deleting '%s' bucket", n)
-		}
-	}
-
-	bkt, err := tx.CreateBucket(n)
-	if err != nil {
-		return nil, fmt.Errorf("error creating '%s' bucket", n)
-	}
-
-	return bkt, nil
-}
-
-func bktRecreateBucket(bkt *bolt.Bucket, n []byte) error {
-	if bkt.Bucket(n) != nil {
-		if err := bkt.DeleteBucket(n); err != nil {
-			return fmt.Errorf("error deleting '%s' bucket", n)
-		}
-	}
-
-	if _, err := bkt.CreateBucket(n); err != nil {
-		return fmt.Errorf("error creating '%s' bucket", n)
-	}
-
-	return nil
-}
-
-func createCookieBucket(tx *bolt.Tx) error {
-	_, err := tx.CreateBucketIfNotExists(namesBucket)
-	if err != nil {
-		return err
-	}
-
-	_, err = tx.CreateBucketIfNotExists(cookieBucket)
-	if err != nil {
-		return err
-	}
-
-	return nil
 }
 
 func createJobsBucket(tx *bolt.Tx) error {

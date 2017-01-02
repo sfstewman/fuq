@@ -12,7 +12,8 @@ import (
 )
 
 type Foreman struct {
-	*srv.DbStore
+	srv.JobQueuer
+	srv.CookieMaker
 
 	// XXX: worth replacing with something that can scale?
 	// we need to lock the database with every request; should
@@ -32,15 +33,16 @@ type Foreman struct {
 }
 
 func NewForeman(config fuq.Config, done chan<- struct{}) (*Foreman, error) {
-	d, err := srv.NewDbStore(config.DbPath)
+	stores, err := srv.NewStores(srv.Files{Jobs: config.DbPath})
 	if err != nil {
 		return nil, err
 	}
 
 	f := Foreman{
-		Config:  config,
-		DbStore: d,
-		Done:    done,
+		Config:      config,
+		JobQueuer:   stores.Jobs,
+		CookieMaker: stores.Cookies,
+		Done:        done,
 	}
 
 	f.jobsSignal.cond = sync.NewCond(&f.jobsSignal.mu)
@@ -139,7 +141,7 @@ func (f *Foreman) HandleNodeReauth(resp http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	cookie, err := f.RegenerateCookie(hello.NodeInfo)
+	cookie, err := f.RenewCookie(hello.NodeInfo)
 	if err != nil {
 		log.Printf("error regenerating cookie: %v", err)
 		fuq.BadRequest(resp, req)
