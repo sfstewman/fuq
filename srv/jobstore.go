@@ -52,13 +52,16 @@ var statusBuckets map[fuq.JobStatus][]byte = map[fuq.JobStatus][]byte{
 type JobQueuer interface {
 	Close() error
 	ClearJobs() error
-	AllJobs() ([]fuq.JobDescription, error)
 	FetchJobs(name, status string) ([]fuq.JobDescription, error)
 	ChangeJobState(jobId fuq.JobId, newState fuq.JobStatus) (fuq.JobStatus, error)
 	AddJob(job fuq.JobDescription) (fuq.JobId, error)
 	UpdateTaskStatus(update fuq.JobStatusUpdate) error
 	FetchJobTaskStatus(jobId fuq.JobId) (fuq.JobTaskStatus, error)
 	FetchPendingTasks(nproc int) ([]fuq.Task, error)
+}
+
+func AllJobs(q JobQueuer) ([]fuq.JobDescription, error) {
+	return q.FetchJobs("", "")
 }
 
 type JobStore struct {
@@ -132,10 +135,6 @@ func (d *JobStore) ClearJobs() error {
 	}
 
 	return nil
-}
-
-func (d *JobStore) AllJobs() ([]fuq.JobDescription, error) {
-	return d.FetchJobs("", "")
 }
 
 func validJobKeyPrefix(ks string) bool {
