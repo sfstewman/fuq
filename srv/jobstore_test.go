@@ -229,3 +229,40 @@ func TestChangeJobState(t *testing.T) {
 		}
 	}
 }
+
+func TestClearJobs(t *testing.T) {
+	tmp := openTestDB()
+	defer cleanupTestDB(tmp)
+
+	js, err := newJobStore(tmp)
+	if err != nil {
+		log.Fatalf("error in creating job store: %v", err)
+	}
+	defer js.Close()
+
+	expectedJobs, _ := addJobs(t, js, testJobs)
+
+	jobs, err := AllJobs(js)
+	if err != nil {
+		t.Fatalf("error fetching jobs: %v", err)
+	}
+
+	if len(jobs) != len(expectedJobs) {
+		t.Errorf("expected %d jobs before ClearJobs(), but found %d",
+			len(expectedJobs), len(jobs))
+	}
+
+	if err := js.ClearJobs(); err != nil {
+		t.Fatalf("error clearing jobs: %v", err)
+	}
+
+	jobs, err = AllJobs(js)
+	if err != nil {
+		t.Fatalf("error fetching jobs: %v", err)
+	}
+
+	if len(jobs) != 0 {
+		t.Errorf("expected no jobs after ClearJobs(), but found %d",
+			len(jobs))
+	}
+}
