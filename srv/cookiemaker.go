@@ -27,6 +27,24 @@ type CookieJar struct {
 
 var _ CookieMaker = (*CookieJar)(nil)
 
+func NewCookieJar(jarPath string) (*CookieJar, error) {
+	db, err := bolt.Open(jarPath, 0666, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error opening database '%s': %v",
+			jarPath, err)
+	}
+
+	return newCookieJar(db)
+}
+
+func newCookieJar(db *bolt.DB) (*CookieJar, error) {
+	if err := db.Update(createCookieBucket); err != nil {
+		return nil, fmt.Errorf("error creating database scheme: %v", err)
+	}
+
+	return &CookieJar{db: db}, nil
+}
+
 func createCookieBucket(tx *bolt.Tx) error {
 	_, err := tx.CreateBucketIfNotExists(namesBucket)
 	if err != nil {
@@ -38,6 +56,10 @@ func createCookieBucket(tx *bolt.Tx) error {
 		return err
 	}
 
+	return nil
+}
+
+func (cj *CookieJar) Close() error {
 	return nil
 }
 

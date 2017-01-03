@@ -14,6 +14,7 @@ import (
 type Foreman struct {
 	srv.JobQueuer
 	srv.CookieMaker
+	stores *srv.Stores
 
 	// XXX: worth replacing with something that can scale?
 	// we need to lock the database with every request; should
@@ -32,6 +33,10 @@ type Foreman struct {
 	Done chan<- struct{}
 }
 
+func (f *Foreman) Close() error {
+	return f.stores.Close()
+}
+
 func NewForeman(config fuq.Config, done chan<- struct{}) (*Foreman, error) {
 	stores, err := srv.NewStores(srv.Files{Jobs: config.DbPath})
 	if err != nil {
@@ -42,6 +47,7 @@ func NewForeman(config fuq.Config, done chan<- struct{}) (*Foreman, error) {
 		Config:      config,
 		JobQueuer:   stores.Jobs,
 		CookieMaker: stores.Cookies,
+		stores:      stores,
 		Done:        done,
 	}
 

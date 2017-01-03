@@ -61,44 +61,32 @@ type JobQueuer interface {
 	FetchPendingTasks(nproc int) ([]fuq.Task, error)
 }
 
-type DbStore struct {
+type JobStore struct {
 	db *bolt.DB
 }
 
-var _ JobQueuer = (*DbStore)(nil)
+var _ JobQueuer = (*JobStore)(nil)
 
-type Jobs struct {
-	store *DbStore
-}
-
-func (d *DbStore) Jobs() Jobs {
-	return Jobs{store: d}
-}
-
-func NewDbStore(dbpath string) (*DbStore, error) {
+func NewJobStore(dbpath string) (*JobStore, error) {
 	db, err := bolt.Open(dbpath, 0666, nil)
 	if err != nil {
 		return nil, fmt.Errorf("error opening database '%s': %v",
 			dbpath, err)
 	}
 
-	if err := createSchema(db); err != nil {
+	return newJobStore(db)
+}
+
+func newJobStore(db *bolt.DB) (*JobStore, error) {
+	if err := db.Update(createJobsBucket); err != nil {
 		return nil, fmt.Errorf("error creating database scheme: %v", err)
 	}
 
-	d := DbStore{
-		db: db,
-	}
-	return &d, nil
+	return &JobStore{db: db}, nil
 }
 
-func (d *DbStore) Close() error {
-	if d.db == nil {
-		return nil
-	}
-	err := d.db.Close()
-	d.db = nil
-	return err
+func (d *JobStore) Close() error {
+	return nil
 }
 
 func createJobsBucket(tx *bolt.Tx) error {
@@ -126,20 +114,7 @@ func createJobsBucket(tx *bolt.Tx) error {
 	return nil
 }
 
-func createSchema(db *bolt.DB) error {
-	return db.Update(func(tx *bolt.Tx) error {
-		if err := createCookieBucket(tx); err != nil {
-			return err
-		}
-
-		if err := createJobsBucket(tx); err != nil {
-			return err
-		}
-		return nil
-	})
-}
-
-func (d *DbStore) ClearJobs() error {
+func (d *JobStore) ClearJobs() error {
 	err := d.db.Update(func(tx *bolt.Tx) error {
 		if err := tx.DeleteBucket(jobBucket); err != nil {
 			return fmt.Errorf("error deleting '%s' bucket", jobBucket)
@@ -159,7 +134,7 @@ func (d *DbStore) ClearJobs() error {
 	return nil
 }
 
-func (d *DbStore) AllJobs() ([]fuq.JobDescription, error) {
+func (d *JobStore) AllJobs() ([]fuq.JobDescription, error) {
 	return d.FetchJobs("", "")
 }
 
@@ -207,7 +182,7 @@ func fetchJob(jobBucket *bolt.Bucket, jobId fuq.JobId) (fuq.JobDescription, erro
 	return bytesToJob(raw)
 }
 
-func (d *DbStore) FetchJobs(name, status string) ([]fuq.JobDescription, error) {
+func (d *JobStore) FetchJobs(name, status string) ([]fuq.JobDescription, error) {
 	var jobs []fuq.JobDescription
 
 	err := d.db.View(func(tx *bolt.Tx) error {
@@ -278,7 +253,7 @@ func (d *DbStore) FetchJobs(name, status string) ([]fuq.JobDescription, error) {
 	return jobs, nil
 }
 
-func (d *DbStore) ChangeJobState(jobId fuq.JobId, newState fuq.JobStatus) (fuq.JobStatus, error) {
+func (d *JobStore) ChangeJobState(jobId fuq.JobId, newState fuq.JobStatus) (fuq.JobStatus, error) {
 	prevStatus := fuq.JobStatus(0)
 	err := d.db.Update(func(tx *bolt.Tx) error {
 		var err error
@@ -288,15 +263,15 @@ func (d *DbStore) ChangeJobState(jobId fuq.JobId, newState fuq.JobStatus) (fuq.J
 	return prevStatus, err
 }
 
-func (d *DbStore) HoldJob(jobId fuq.JobId) (fuq.JobStatus, error) {
+func (d *JobStore) HoldJob(jobId fuq.JobId) (fuq.JobStatus, error) {
 	return d.ChangeJobState(jobId, fuq.Paused)
 }
 
-func (d *DbStore) ReleaseJob(jobId fuq.JobId) (fuq.JobStatus, error) {
+func (d *JobStore) ReleaseJob(jobId fuq.JobId) (fuq.JobStatus, error) {
 	return d.ChangeJobState(jobId, fuq.Waiting)
 }
 
-func (d *DbStore) CancelJob(jobId fuq.JobId) (fuq.JobStatus, error) {
+func (d *JobStore) CancelJob(jobId fuq.JobId) (fuq.JobStatus, error) {
 	return d.ChangeJobState(jobId, fuq.Cancelled)
 }
 
@@ -324,7 +299,7 @@ func jobIndexKey(job fuq.JobDescription) []byte {
 	return b.Bytes()
 }
 
-func (d *DbStore) AddJob(job fuq.JobDescription) (fuq.JobId, error) {
+func (d *JobStore) AddJob(job fuq.JobDescription) (fuq.JobId, error) {
 	jobId := uint64(0)
 
 	err := d.db.Update(func(tx *bolt.Tx) error {
@@ -421,7 +396,7 @@ type statusBkt struct {
 	curs *bolt.Cursor
 }
 
-func (d *DbStore) getStatusBucket(tx *bolt.Tx, status fuq.JobStatus) (statusBkt, error) {
+func (d *JobStore) getStatusBucket(tx *bolt.Tx, status fuq.JobStatus) (statusBkt, error) {
 	jb, err := getJobBucket(tx)
 	if err != nil {
 		return statusBkt{}, err
@@ -501,7 +476,7 @@ func (sb *statusBkt) FirstJob() fuq.JobId {
 	return sb.keyToId(k)
 }
 
-func (d *DbStore) updateJobInTx(tx *bolt.Tx,
+func (d *JobStore) updateJobInTx(tx *bolt.Tx,
 	jobId fuq.JobId, fxn func(*fuq.JobDescription) error) error {
 
 	jb, err := getJobBucket(tx)
@@ -577,7 +552,7 @@ func (d *DbStore) updateJobInTx(tx *bolt.Tx,
 	return nil
 }
 
-func (d *DbStore) setJobStatus(tx *bolt.Tx, jobId fuq.JobId, status fuq.JobStatus) (fuq.JobStatus, error) {
+func (d *JobStore) setJobStatus(tx *bolt.Tx, jobId fuq.JobId, status fuq.JobStatus) (fuq.JobStatus, error) {
 	prevStatus := fuq.JobStatus(0)
 	err := d.updateJobInTx(tx, jobId, func(desc *fuq.JobDescription) error {
 		prevStatus = desc.Status
@@ -592,7 +567,7 @@ func (d *DbStore) setJobStatus(tx *bolt.Tx, jobId fuq.JobId, status fuq.JobStatu
 	return prevStatus, nil
 }
 
-func (d *DbStore) fetchJobTasksFromBkt(jb *bolt.Bucket, jobId fuq.JobId) (*fuq.JobTaskData, error) {
+func (d *JobStore) fetchJobTasksFromBkt(jb *bolt.Bucket, jobId fuq.JobId) (*fuq.JobTaskData, error) {
 	taskData := fuq.JobTaskData{}
 	jobTaskKey := getJobTaskKey(jobId)
 	rawTaskData := jb.Get(jobTaskKey)
@@ -618,7 +593,7 @@ func (d *DbStore) fetchJobTasksFromBkt(jb *bolt.Bucket, jobId fuq.JobId) (*fuq.J
 
 }
 
-func (d *DbStore) updateJobTasksInTx(tx *bolt.Tx, jobId fuq.JobId, fxn func(*fuq.JobTaskData) error) error {
+func (d *JobStore) updateJobTasksInTx(tx *bolt.Tx, jobId fuq.JobId, fxn func(*fuq.JobTaskData) error) error {
 	jb, err := getJobBucket(tx)
 	if err != nil {
 		return err
@@ -649,7 +624,7 @@ func (d *DbStore) updateJobTasksInTx(tx *bolt.Tx, jobId fuq.JobId, fxn func(*fuq
 	return nil
 }
 
-func (d *DbStore) UpdateTaskStatus(update fuq.JobStatusUpdate) error {
+func (d *JobStore) UpdateTaskStatus(update fuq.JobStatusUpdate) error {
 	return d.db.Update(func(tx *bolt.Tx) error {
 		numRunning := -1
 		numPending := -1
@@ -695,7 +670,7 @@ func (d *DbStore) UpdateTaskStatus(update fuq.JobStatusUpdate) error {
 	})
 }
 
-func (d *DbStore) nextTasksForJob(tx *bolt.Tx, jobId fuq.JobId, maxTasks int) ([]int, error) {
+func (d *JobStore) nextTasksForJob(tx *bolt.Tx, jobId fuq.JobId, maxTasks int) ([]int, error) {
 	var tasklist []int
 
 	err := d.updateJobTasksInTx(tx, jobId, func(taskData *fuq.JobTaskData) error {
@@ -730,7 +705,7 @@ func (d *DbStore) nextTasksForJob(tx *bolt.Tx, jobId fuq.JobId, maxTasks int) ([
 	return tasklist, nil
 }
 
-func (d *DbStore) getAvailableTasks(tx *bolt.Tx, jobId fuq.JobId, max int) ([]fuq.Task, error) {
+func (d *JobStore) getAvailableTasks(tx *bolt.Tx, jobId fuq.JobId, max int) ([]fuq.Task, error) {
 	jobTasks, err := d.nextTasksForJob(tx, jobId, max)
 	if err != nil {
 		return nil, err
@@ -764,7 +739,7 @@ func (d *DbStore) getAvailableTasks(tx *bolt.Tx, jobId fuq.JobId, max int) ([]fu
 	return tasks, nil
 }
 
-func (d *DbStore) FetchJobTaskStatus(jobId fuq.JobId) (fuq.JobTaskStatus, error) {
+func (d *JobStore) FetchJobTaskStatus(jobId fuq.JobId) (fuq.JobTaskStatus, error) {
 	var status fuq.JobTaskStatus
 
 	err := d.db.View(func(tx *bolt.Tx) error {
@@ -803,7 +778,7 @@ func (d *DbStore) FetchJobTaskStatus(jobId fuq.JobId) (fuq.JobTaskStatus, error)
 	return status, err
 }
 
-func (d *DbStore) FetchPendingTasks(nproc int) ([]fuq.Task, error) {
+func (d *JobStore) FetchPendingTasks(nproc int) ([]fuq.Task, error) {
 	tasks := []fuq.Task{}
 
 	err := d.db.Update(func(tx *bolt.Tx) error {
