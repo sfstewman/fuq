@@ -53,6 +53,7 @@ type JobQueuer interface {
 	Close() error
 	ClearJobs() error
 	FetchJobs(name, status string) ([]fuq.JobDescription, error)
+	FetchJobId(fuq.JobId) (fuq.JobDescription, error)
 	ChangeJobState(jobId fuq.JobId, newState fuq.JobStatus) (fuq.JobStatus, error)
 	AddJob(job fuq.JobDescription) (fuq.JobId, error)
 	UpdateTaskStatus(update fuq.JobStatusUpdate) error
@@ -250,6 +251,17 @@ func (d *JobStore) FetchJobs(name, status string) ([]fuq.JobDescription, error) 
 	}
 
 	return jobs, nil
+}
+
+func (js *JobStore) FetchJobId(jobId fuq.JobId) (fuq.JobDescription, error) {
+	var desc fuq.JobDescription
+	err := js.db.View(func(tx *bolt.Tx) error {
+		var err error
+		desc, err = fetchJobFromTx(tx, jobId)
+		return err
+	})
+
+	return desc, err
 }
 
 func (d *JobStore) ChangeJobState(jobId fuq.JobId, newState fuq.JobStatus) (fuq.JobStatus, error) {
