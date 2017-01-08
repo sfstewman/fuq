@@ -1,5 +1,10 @@
 package fuq
 
+import (
+	"fmt"
+	"os"
+)
+
 type Client struct {
 	Password string `json:"password"`
 	Client   string `json:"client"`
@@ -7,9 +12,30 @@ type Client struct {
 
 type NodeInfo struct {
 	Node     string   `json:"node"`
+	Pid      int      `json:"pid"`
 	UniqName string   `json:"unique_name,omitempty"`
 	Tags     []string `json:"tags,omitempty"`
 	NumProc  int      `json:"nproc"`
+}
+
+func (ni NodeInfo) Prefix() string {
+	return fmt.Sprintf("%s:%d", ni.Node, ni.Pid)
+}
+
+func NewNodeInfo(nproc int, tags ...string) (NodeInfo, error) {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return NodeInfo{}, err
+	}
+
+	pid := os.Getpid()
+
+	return NodeInfo{
+		Node:    hostname,
+		Pid:     pid,
+		Tags:    tags,
+		NumProc: nproc,
+	}, nil
 }
 
 /* HasTag returns whether the NodeInfo has a given tag.  At the moment,

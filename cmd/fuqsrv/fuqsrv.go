@@ -126,14 +126,13 @@ type WorkerConfig struct {
 	allStop  bool
 }
 
-func NewWorkerConfig(nodeName string, nproc int, tags []string) *WorkerConfig {
-	return &WorkerConfig{
-		NodeInfo: fuq.NodeInfo{
-			Node:    nodeName,
-			NumProc: nproc,
-			Tags:    tags,
-		},
+func NewWorkerConfig(nproc int, tags []string) (*WorkerConfig, error) {
+	ni, err := fuq.NewNodeInfo(nproc, tags...)
+	if err != nil {
+		return nil, err
 	}
+
+	return &WorkerConfig{NodeInfo: ni}, nil
 }
 
 func (wc *WorkerConfig) IsAllStop() bool {
@@ -532,7 +531,6 @@ func main() {
 	var (
 		err                          error
 		isForeman, onlyWriteConfig   bool
-		hostname, workerName         string
 		srvConfigFile, sysConfigFile string
 		retryServerConfig            bool
 		workerTag                    string
@@ -548,12 +546,6 @@ func main() {
 	isForeman = false
 	onlyWriteConfig = false
 
-	// set worker name, defaults to hostname
-	hostname, err = os.Hostname()
-	if err != nil {
-		log.Printf("error retrieving hostname: %v", err)
-	}
-
 	pv, err = fuq.SetupPaths()
 	if err != nil {
 		log.Fatalf("error setting up paths: %v", err)
@@ -564,11 +556,6 @@ func main() {
 		log.Fatalf("error retrieving current user: %v", err)
 	}
 
-	workerName = hostname
-	if workerName == "" {
-		workerName = "worker"
-	}
-
 	// default config file
 	srvConfigFile = fuq.DefaultServerConfigPath()
 	sysConfigFile = fuq.DefaultSystemConfigPath()
@@ -577,7 +564,6 @@ func main() {
 	flag.BoolVar(&isForeman, "f", false, "invoke fuq as foreman")
 	flag.BoolVar(&onlyWriteConfig, "w", false, "invoke fuq and foreman, write config, and exit")
 	flag.IntVar(&numCPUs, "np", 1, "number of concurrent cores")
-	flag.StringVar(&workerName, "p", workerName, "worker prefix")
 	flag.StringVar(&srvConfigFile, "srv", srvConfigFile, "server configuration file")
 	flag.StringVar(&sysConfigFile, "cfg", sysConfigFile, "configuration file")
 	flag.BoolVar(&overwriteConfig, "force_cfg", overwriteConfig,
@@ -720,7 +706,11 @@ func main() {
 		tags = []string{workerTag}
 	}
 
-	wc := NewWorkerConfig(workerName, nproc, tags)
+	wc, err := NewWorkerConfig(nproc, tags)
+	if err != nil {
+		log.Fatalf("error generating worker config: %v", err)
+	}
+
 	if err := startWorkers(wc, nproc, config, &wg); err != nil {
 		log.Fatalf("error starting workers: %v", err)
 	}

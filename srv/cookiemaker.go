@@ -91,6 +91,10 @@ func addUniqueName(names *bolt.Bucket, name string) error {
 }
 
 func uniquifyName(names *bolt.Bucket, name string) (string, error) {
+	if !names.Writable() {
+		panic("bucket passed to uniquifyNames must be writable (hold the write lock)")
+	}
+
 	for i := uint(1); i > 0; i++ {
 		attempt := fmt.Sprintf("%s:%d", name, i)
 		if !isNameRegistered(names, attempt) {
@@ -166,7 +170,7 @@ func (cj *CookieJar) MakeCookie(ni fuq.NodeInfo) (fuq.Cookie, error) {
 
 		names = cj.namesBucket(tx)
 		if cj.needsUniqueName(names, ni) {
-			ni.UniqName, err = uniquifyName(names, ni.Node)
+			ni.UniqName, err = uniquifyName(names, ni.Prefix())
 			if err != nil {
 				return err
 			}
