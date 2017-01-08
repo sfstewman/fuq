@@ -10,6 +10,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/vmihailenco/msgpack.v2"
 	"log"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -640,15 +641,14 @@ func (d *JobStore) UpdateTaskStatus(update fuq.JobStatusUpdate) error {
 		numRunning := -1
 		numPending := -1
 		err := d.updateJobTasksInTx(tx, update.JobId, func(tasks *fuq.JobTaskData) error {
-			for i, v := range tasks.Running {
-				if v != update.Task {
-					continue
-				}
-
-				tasks.Running[i] = tasks.Running[len(tasks.Running)-1]
-				tasks.Running = tasks.Running[:len(tasks.Running)-1]
-				break
+			ind := sort.SearchInts(tasks.Running, update.Task)
+			if ind >= len(tasks.Running) || tasks.Running[ind] != update.Task {
+				return fmt.Errorf("task %d is not in the running list", update.Task)
 			}
+
+			copy(tasks.Running[ind:], tasks.Running[ind+1:])
+			tasks.Running = tasks.Running[:len(tasks.Running)-1]
+
 			numRunning = len(tasks.Running)
 			numPending = len(tasks.Pending)
 

@@ -1,6 +1,7 @@
 package srv
 
 import (
+	"fmt"
 	"github.com/sfstewman/fuq"
 	"testing"
 )
@@ -293,8 +294,47 @@ func jqTestFetchPendingTasks(t *testing.T, jq JobQueuer) {
 	}
 }
 
+func checkJobTaskStatus(actual, expected fuq.JobTaskStatus) error {
+	if actual.Description != expected.Description {
+		return fmt.Errorf("status should have description %v, but found %v",
+			expected.Description, actual.Description)
+	}
+
+	if expected.TasksFinished != actual.TasksFinished {
+		return fmt.Errorf("status should have %d tasks finished, but found %d",
+			expected.TasksFinished, actual.TasksFinished)
+	}
+
+	if expected.TasksPending != actual.TasksPending {
+		return fmt.Errorf("status should have %d tasks pending, but found %d",
+			expected.TasksPending, actual.TasksPending)
+	}
+
+	if len(expected.TasksRunning) != len(actual.TasksRunning) {
+		return fmt.Errorf("status should have %d tasks running, but found %d",
+			len(expected.TasksRunning), len(actual.TasksRunning))
+	}
+
+	expectedRunning := expected.TasksRunning
+	actualRunning := actual.TasksRunning
+
+	for i, ev := range expectedRunning {
+		if actualRunning[i] != ev {
+			return fmt.Errorf("expected tasks running to be %#v, but found %#v",
+				expected.TasksRunning, actual.TasksRunning)
+		}
+	}
+
+	if len(expected.TasksWithErrors) != len(actual.TasksWithErrors) {
+		return fmt.Errorf("status should have %d tasks with errors, but found %d",
+			len(expected.TasksWithErrors), len(actual.TasksWithErrors))
+	}
+
+	return nil
+}
+
 func jqTestFetchAndUpdatePendingTasks(t *testing.T, jq JobQueuer) {
-	tasks, err := jq.FetchPendingTasks(2)
+	tasks, err := jq.FetchPendingTasks(4)
 	if err != nil {
 		t.Fatalf("error fetching pending tasks (no tasks): %v", err)
 	}
@@ -305,12 +345,12 @@ func jqTestFetchAndUpdatePendingTasks(t *testing.T, jq JobQueuer) {
 
 	expectedJobs, _ := addJobs(t, jq, testJobs)
 
-	tasks, err = jq.FetchPendingTasks(2)
+	tasks, err = jq.FetchPendingTasks(4)
 	if err != nil {
 		t.Fatalf("error fetching pending tasks (no tasks): %v", err)
 	}
 
-	if len(tasks) != 2 {
+	if len(tasks) != 4 {
 		t.Fatalf("expected two tasks, but %d returned: %v", len(tasks), tasks)
 	}
 
@@ -322,40 +362,21 @@ func jqTestFetchAndUpdatePendingTasks(t *testing.T, jq JobQueuer) {
 		t.Fatalf("error fetching task status for job %d: %v", id, err)
 	}
 
-	if status.Description != expectedJobs[0] {
-		t.Errorf("status of job %d should return %v, but %v",
-			id, expectedJobs[0], status.Description)
-	}
-
-	if status.TasksFinished != 0 {
-		t.Errorf("job %d should have no tasks finished, but found %d",
-			id, status.TasksFinished)
-	}
-
-	ntasks := expectedJobs[0].NumTasks - 2
-	if status.TasksPending != ntasks {
-		t.Errorf("job %d should have %d tasks pending, but found %d",
-			id, ntasks, status.TasksFinished)
-	}
-
-	if len(status.TasksRunning) != 2 {
-		t.Errorf("job %d should have %d tasks running, but found %d",
-			id, 2, len(status.TasksRunning))
-	}
-
-	if status.TasksRunning[0] != 1 || status.TasksRunning[1] != 2 {
-		t.Errorf("job %d running tasks should be 1 and 2, but found %v",
-			id, status.TasksRunning)
-	}
-
-	if len(status.TasksWithErrors) != 0 {
-		t.Errorf("job %d should have no tasks with errors, but found %d",
-			id, len(status.TasksRunning))
+	ntasks := expectedJobs[0].NumTasks - 4
+	err = checkJobTaskStatus(status, fuq.JobTaskStatus{
+		Description:     expectedJobs[0],
+		TasksFinished:   0,
+		TasksPending:    ntasks,
+		TasksRunning:    []int{1, 2, 3, 4},
+		TasksWithErrors: []int{},
+	})
+	if err != nil {
+		t.Errorf("task status: %v", err)
 	}
 
 	update := fuq.JobStatusUpdate{
 		JobId:   id,
-		Task:    tasks[0].Task,
+		Task:    2,
 		Success: true,
 		Status:  "done",
 	}
@@ -364,43 +385,21 @@ func jqTestFetchAndUpdatePendingTasks(t *testing.T, jq JobQueuer) {
 		t.Errorf("job %d update error: %v", id, err)
 	}
 
-	id = expectedJobs[0].JobId
 	status, err = jq.FetchJobTaskStatus(id)
 	if err != nil {
 		t.Fatalf("error fetching task status for job %d: %v", id, err)
 	}
 
-	if status.Description != expectedJobs[0] {
-		t.Errorf("status of job %d should return %v, but %v",
-			id, expectedJobs[0], status.Description)
+	err = checkJobTaskStatus(status, fuq.JobTaskStatus{
+		Description:     expectedJobs[0],
+		TasksFinished:   1,
+		TasksPending:    ntasks,
+		TasksRunning:    []int{1, 3, 4},
+		TasksWithErrors: []int{},
+	})
+	if err != nil {
+		t.Errorf("task status: %v", err)
 	}
-
-	if status.TasksFinished != 1 {
-		t.Errorf("job %d should have one task finished, but found %d",
-			id, status.TasksFinished)
-	}
-
-	ntasks = expectedJobs[0].NumTasks - 2
-	if status.TasksPending != ntasks {
-		t.Errorf("job %d should have %d tasks finished, but found %d",
-			id, ntasks, status.TasksFinished)
-	}
-
-	if len(status.TasksRunning) != 1 {
-		t.Errorf("job %d should have one task running, but found %d",
-			id, len(status.TasksRunning))
-	}
-
-	if status.TasksRunning[0] != 2 {
-		t.Errorf("job %d running tasks should be 2, but found %v",
-			id, status.TasksRunning)
-	}
-
-	if len(status.TasksWithErrors) != 0 {
-		t.Errorf("job %d should have %d tasks finished, but found %d",
-			id, 2, len(status.TasksRunning))
-	}
-
 }
 
 type jqTest struct {
