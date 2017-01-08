@@ -40,6 +40,8 @@ func printIndent(indent int) {
 func walkCursor(c *bolt.Cursor, indent int) error {
 	cBkt := c.Bucket()
 
+	printIndent(indent)
+	fmt.Printf("cursor bucket is %p: %#v\n", cBkt, cBkt)
 	for k, v := c.First(); k != nil; k, v = c.Next() {
 		ks := string(k)
 		printIndent(indent)
@@ -94,7 +96,7 @@ func runProgram() error {
 	}
 	dbName := os.Args[1]
 
-	fmt.Println("opening database %s\n", dbName)
+	fmt.Printf("opening database %s\n", dbName)
 
 	db, err := bolt.Open(dbName, 0666, &bolt.Options{ReadOnly: true})
 	if err != nil {
