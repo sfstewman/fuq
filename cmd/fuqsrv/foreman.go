@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/sfstewman/fuq"
 	"github.com/sfstewman/fuq/srv"
+	"golang.org/x/net/http2"
 	"log"
 	"net/http"
 	"os"
@@ -80,6 +81,7 @@ func (f *Foreman) HandleHello(resp http.ResponseWriter, req *http.Request) {
 	hello := fuq.Hello{}
 	fmt.Fprintf(os.Stderr, "--> HELLO from %s\n", req.RemoteAddr)
 	log.Printf("received HELLO request from %s", req.RemoteAddr)
+	log.Printf("protocol is %s.  version %d.%d", req.Proto, req.ProtoMajor, req.ProtoMinor)
 	if err := dec.Decode(&hello); err != nil {
 		log.Printf("error unmarshaling request at %s: %v",
 			req.URL, err)
@@ -609,6 +611,12 @@ func (f *Foreman) StartAPIServer() error {
 		Handler:   mux,
 		TLSConfig: tlsConfig,
 	}
+
+	// enable http/2 support
+	if err := http2.ConfigureServer(&srv, nil); err != nil {
+		return fmt.Errorf("error adding http/2 support: %v", err)
+	}
+	// tlsConfig.NextProtos = append(tlsConfig.NextProtos, "h2")
 
 	if err := srv.ListenAndServeTLS("", ""); err != nil {
 		return fmt.Errorf("Error starting foreman: %v", err)

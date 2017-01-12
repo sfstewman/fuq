@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"golang.org/x/net/http2"
 	"log"
 	"net/http"
 	"os"
@@ -87,6 +88,14 @@ func IsForbidden(err error) bool {
 }
 
 func NewEndpoint(c Config) (*Endpoint, error) {
+	return makeEndpoint(c, true)
+}
+
+func NewConversation(c Config) (*Endpoint, error) {
+	return makeEndpoint(c, false)
+}
+
+func makeEndpoint(c Config, configHTTP2 bool) (*Endpoint, error) {
 	tlsConfig, err := SetupTLSRootCA(c)
 	if err != nil {
 		return nil, fmt.Errorf("error setting up tls config: %v", err)
@@ -95,6 +104,13 @@ func NewEndpoint(c Config) (*Endpoint, error) {
 	transport := &http.Transport{
 		TLSClientConfig:    tlsConfig,
 		DisableCompression: true,
+	}
+
+	// enable http/2 support
+	if configHTTP2 {
+		if err := http2.ConfigureTransport(transport); err != nil {
+			return nil, fmt.Errorf("error adding http/2 support: %v", err)
+		}
 	}
 
 	client := &http.Client{
