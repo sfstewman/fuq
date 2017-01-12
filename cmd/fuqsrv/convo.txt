@@ -1,0 +1,153 @@
+Conversation pathway...
+
+Message types:
+     OK	- request PONG response
+     JOB	- job data
+     UPDATE	- update job status
+
+Message header wire format:
+     magic	uint16	2	magic identifier
+     type	uint16	2	what type of message: OK,JOB,UPDATE
+     padding	bytes	4	unused bytes for future extensions
+     arg0	uint32	4	first argument, defined by message type
+     rest	bytes	0+	rest of message, if any.
+
+1. Messages can be longer than the header.  If this is the case, arg0 in
+   the header specifies the remaining message length, and the remaining
+   message data has to be interpreted by the message type.
+
+2. All values are encoded as little endian except for bytes, which may
+   be a collection of bytes, but otherwise must be specified by the
+   message type.
+
+3. As a tuple, the parts that vary on the message are: (message,arg0,rest)
+   if arg0 is not a sequence of four bytes, it is encoded as little
+   endian.
+
+Message types:
+
+     Type	Side	arg0
+     ---------  ------  ----------------------------------------------------
+     OK		client	number of processors
+     		server	arbitrary number
+
+     JOB	server	length of job data (msgpack encoded fuq.Task struct)
+     UPDATE	client	length of job update data (msgpack encoded
+			fuq.JobStatusUpdate)
+
+     STOP	server	nproc to stop. if 0, stop all.  if 0xFFFFFFFF,
+			stop everything immediately
+
+     ERROR	both	error code
+
+Conversation description:
+
+Client:
+     one state constant:	max_proc
+     two state variables:	nproc, max_nproc
+     	nproc = max_proc, max_nproc = max_proc
+
+     Initial greeting:
+
+     1. wait for OK from server
+     2. send OK(nproc) to server
+     3. wait for OK(nproc) from server
+     4. start wait loop
+
+     client_loop:
+
+     1. message from server:
+     	JOB message:
+     		if nproc > job_nproc:
+     			nproc -= job_nproc
+     			start job
+     		else send ERROR(cannot_run_job)
+
+     	STOP message:
+     		if stop_immed, exit
+     		else, 	max_nproc = max(0, max_nproc-stop_nstop),
+			goto client_loop
+
+     2. Job finishes in client:
+	nproc = min(max_nproc, nproc+job_nproc)
+	send UPDATE(nproc)
+	wait for OK(nproc)
+	if nproc == 0, exit
+	goto client_loop
+
+Server:
+	Initial greeting:
+
+	1. send OK(0)
+	2. wait for OK(nproc), record nproc for client
+	3. send OK(nproc)
+	4. start server_loop
+
+	server_loop:
+
+	1. npending = check for pending tasks (up to nproc)
+	2. if npending > 0, send JOB(npending) to client
+
+	3. wait for events
+		on JOB_QUEUED:
+			goto server_loop
+		on client UPDATE(nproc):
+			record task status
+			update nproc for client
+			send OK(nproc) to client
+			goto server_loop
+		on STOP_REQUEST(n):
+			send STOP(n)
+		on STOP_IMMED:
+			send STOP(immed)
+		on DISCONNECT:
+			exit server loop
+
+
+Client states:
+
+State		Event		Action					Next state
+CL_INIT0	on OK(0)	send OK(nproc)				CL_INIT1
+CL_INIT1	on OK(nproc)	-					CL_LOOP0
+
+CL_LOOP0	on JOB(nproc)	if nproc > job_nproc,			CL_LOOP0
+					nproc -= job_nproc
+					start job
+				else send ERROR(cannot_run_job)		CL_LOOP0
+
+		on STOP(n)	if n==immed				CL_EXIT1
+				else, max_nproc = max(0,max_nproc-n)	CL_LOOP0
+
+		on job done	nproc=min(max_nproc,nproc+job_nproc)	CL_UPDATE0
+
+CL_UPDATE0	-		send UPDATE(nproc)			CL_UPDATE1
+
+CL_UPDATE1	on OK(nproc)	if nproc == 0				CL_EXIT0
+				else					CL_LOOP0
+
+CL_EXIT0	-		normal exit				-
+CL_EXIT1	-		immediate exit, os.Exit(0)		-
+
+
+Server states:
+
+State		Event		Action					Next state
+SV_INIT0	-		send OK(0)				SV_INIT1
+SV_INIT1	on OK(n)	record nproc=n				SV_INIT2
+SV_INIT2	-		send OK(nproc)				SV_LOOP0
+
+SV_LOOP0	-		request npending<=nproc pending tasks	SV_LOOP1
+SV_LOOP1	-		if npending > 0, send JOB(npending)	SV_LOOP2
+				else					SV_LOOP2
+
+SV_LOOP2	on JOB_QUEUED	-					SV_LOOP0
+		on UPDATE(n)	record task status, set nproc=n		SV_LOOP3
+		on STOP_REQ(n)	send STOP(n)				SV_LOOP0
+		on STOP_IMMED	send STOP(immed)			SV_LOOP0
+		on DISCONNECT	-					SV_EXIT
+
+SV_LOOP3	-		send OK(nproc)				SV_LOOP0
+
+SV_EXIT		-		exit server loop
+
+
