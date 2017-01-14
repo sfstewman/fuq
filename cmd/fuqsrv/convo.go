@@ -4,10 +4,13 @@ import (
 	"encoding/binary"
 	"fmt"
 	"github.com/sfstewman/fuq"
+	"github.com/sfstewman/fuq/srv"
 	"gopkg.in/vmihailenco/msgpack.v2"
 	"io"
+	"net"
 	"net/http"
 	"syscall"
+	"time"
 )
 
 const convoMagic = 0xC047
@@ -267,13 +270,254 @@ func (c *Convo) ReceiveMessage() (MType, interface{}, error) {
 }
 
 /*
-type JobStatusUpdate struct {
-	JobId   JobId       `json:"job_id"`
-	Task    int         `json:"task"`
-	Success bool        `json:"success"`
-	Status  string      `json:"status"`
-	NewJob  *JobRequest `json:"newjob"`
-}
+SV_INIT0	-		send OK(0)				SV_INIT1
+SV_INIT1	on OK(n)	record nproc=n				SV_INIT2
+SV_INIT2	-		send OK(nproc)				SV_LOOP0
+
+SV_LOOP0	-		request npending<=nproc pending tasks	SV_LOOP1
+SV_LOOP1	-		if npending > 0, send JOB(npending)	SV_LOOP2
+				else					SV_LOOP2
+
+SV_LOOP2	on JOB_QUEUED	-					SV_LOOP0
+		on UPDATE(n)	record task status, set nproc=n		SV_LOOP3
+		on STOP_REQ(n)	send STOP(n)				SV_LOOP0
+		on STOP_IMMED	send STOP(immed)			SV_LOOP0
+		on DISCONNECT	-					SV_EXIT
+
+SV_LOOP3	-		send OK(nproc)				SV_LOOP0
+
+SV_EXIT		-		exit server loop
 */
 
-/// func (c *Convo) Send
+type ServerState int
+
+func (s ServerState) String() string {
+	switch s {
+	case SvLoop0:
+		return "SvLoop0"
+	case SvLoop1:
+		return "SvLoop1"
+	case SvLoop2:
+		return "SvLoop2"
+	case SvExit:
+		return "SvExit"
+	default:
+		return fmt.Sprintf("SvUnknown_%d", s)
+	}
+}
+
+const (
+	_                   = iota // zero
+	SvLoop0 ServerState = iota // 1
+	SvLoop1
+	SvLoop2
+	SvExit
+)
+
+type SvEventType uint32
+
+const (
+	_                      = iota
+	SvEvQueued SvEventType = iota
+	SvEvStop
+)
+
+type SvEvent struct {
+	Type SvEventType
+	Arg  uint32
+}
+
+type ServerConvo struct {
+	Convo
+	State       ServerState
+	NumProc     uint32
+	MaxProc     uint32
+	Callback    func(ServerState) error
+	Queue       srv.JobQueuer
+	ReadTimeout time.Duration
+}
+
+func (sv *ServerConvo) SendPendingJobs(n uint32) (uint32, error) {
+	tasks, err := sv.Queue.FetchPendingTasks(int(n))
+	if err != nil {
+		return 0, err
+	}
+
+	// FIXME: send pending tasks!
+
+	return uint32(len(tasks)), nil
+}
+
+func (sv *ServerConvo) UpdateTaskStatus(update fuq.JobStatusUpdate) error {
+	return sv.Queue.UpdateTaskStatus(update)
+}
+
+func timeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	if netErr, ok := err.(net.Error); ok {
+		return netErr.Timeout()
+	}
+
+	return false
+}
+
+type message struct {
+	Type  MType
+	Data  interface{}
+	Error error
+}
+
+func (sv *ServerConvo) readLoop(dataCh chan<- message, done <-chan struct{}) {
+	// check for read timeout
+	netConn, hasTimeout := sv.Convo.I.(net.Conn)
+loop:
+	for {
+		select {
+		case <-done:
+			break loop
+		default:
+			if hasTimeout {
+				deadline := time.Now().Add(sv.ReadTimeout)
+				netConn.SetReadDeadline(deadline)
+			}
+			mt, data, err := sv.ReceiveMessage()
+			if err == io.EOF {
+				break loop
+			}
+			// ignore timeout errors...
+			if timeoutError(err) {
+				continue loop
+			}
+
+			select {
+			case <-done:
+				break loop
+			case dataCh <- message{mt, data, err}:
+				// nop
+			}
+		}
+	}
+
+	close(dataCh)
+}
+
+func (sv *ServerConvo) Loop(evCh <-chan SvEvent) error {
+	var (
+		err error
+	)
+
+	// NOTE: rethink error handling
+
+	// SvInit0
+	if err := sv.SendOK(0); err != nil {
+		return fmt.Errorf("error in sending initial OK: %v", err)
+	}
+
+	// SvInit1
+	np, err := sv.ReceiveOK()
+	if err != nil {
+		return fmt.Errorf("error receiving OK(n): %v", err)
+	}
+
+	sv.NumProc = np
+	sv.MaxProc = np
+
+	if err = sv.SendOK(sv.NumProc); err != nil {
+		return fmt.Errorf("error echoing OK(n): %v", err)
+	}
+
+	done := make(chan struct{})
+	msgCh := make(chan message)
+	go sv.readLoop(msgCh, done)
+
+	for sv.State != SvExit {
+		stNext := sv.State
+
+	event_switch:
+		switch sv.State {
+		case SvLoop0:
+			var nj uint32
+			nj, err = sv.SendPendingJobs(sv.NumProc)
+			sv.NumProc -= nj
+			stNext = SvLoop1
+
+		case SvLoop1:
+			// check for events:
+			// on JOB_QUEUED	-					SV_LOOP0
+			// on UPDATE(n)		record task status, set nproc=n		SV_LOOP2
+			// on STOP_REQ(n)	send STOP(n)				SV_LOOP0
+			// on STOP_IMMED	send STOP(immed)			SV_LOOP0
+			// on DISCONNECT	-					SV_EXIT
+			select {
+			case msg, closed := <-msgCh:
+				if closed { // disconnect
+					stNext = SvExit
+					break event_switch
+				}
+
+				// check message
+				if msg.Error != nil {
+					err = msg.Error
+					break event_switch
+				}
+
+				if msg.Type != MTypeUpdate {
+					err = fmt.Errorf("invalid message type for state %s: 0x%4x",
+						sv.State, msg.Type)
+					break event_switch
+				}
+
+				taskUpdate := msg.Data.(*fuq.JobStatusUpdate)
+				err = sv.UpdateTaskStatus(*taskUpdate)
+				stNext = SvLoop2
+
+			case ev, closed := <-evCh:
+				if closed { // quit request
+					sv.SendStopImmed()
+					stNext = SvExit
+					break event_switch
+				}
+
+				switch ev.Type {
+				case SvEvQueued:
+					stNext = SvLoop0
+				case SvEvStop:
+					err = sv.SendStop(ev.Arg)
+					stNext = SvLoop0
+				default:
+					panic("unknown server event type")
+				}
+			}
+
+		case SvLoop2:
+			err = sv.SendOK(sv.NumProc)
+			stNext = SvLoop0
+
+		case SvExit:
+
+		default:
+			panic("unknown server state")
+		}
+
+		if err != nil {
+			return fmt.Errorf("error encountered in state %s: %v", sv.State, err)
+		}
+
+		if sv.Callback != nil {
+			stCurr := sv.State
+			if err = sv.Callback(stNext); err != nil {
+				return fmt.Errorf("error in callback (%s -> %s): %v",
+					stCurr, stNext, err)
+			}
+		}
+
+		sv.State = stNext
+	}
+
+	close(done)
+
+	return nil
+}
