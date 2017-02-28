@@ -1,13 +1,19 @@
 Conversation pathway...
 
 Message types:
-     OK	- request PONG response
+     HELLO	- announces the worker state to the foreman
+     OK		- general request response
      JOB	- job data
      UPDATE	- update job status
+     STOP	- stop one or more workers
+     RESET	- reset sequence numbers
+     ERROR_xxx	- report a specific error
 
 Message header wire format:
      magic	uint16	2	magic identifier
-     type	uint16	2	what type of message: OK,JOB,UPDATE
+     type	uint8	1	what type of message: OK,JOB,UPDATE
+     subtype	uint8   1	subtype of message, used for error codes
+     seq	uint32  4	message sequence number
      padding	bytes	4	unused bytes for future extensions
      arg0	uint32	4	first argument, defined by message type
      rest	bytes	0+	rest of message, if any.
@@ -20,7 +26,110 @@ Message header wire format:
    be a collection of bytes, but otherwise must be specified by the
    message type.
 
-3. As a tuple, the parts that vary on the message are: (message,arg0,rest)
+3. The message sequence number is used to keep track of message
+   request/response sequences.
+
+   Messages can originate from either the worker or the foreman, and
+   typically require a response.  The sequence number is used to pair
+   the response with the request.  This allows messages the work and
+   foreman to send messages simultaneously and still expect to receive a
+   valid reply.
+
+4. Sequence number rules.  In these rules, we use the following terms:
+
+	* A request is a message requesting or announcing a new change in
+	  state for the worker.
+
+	* A response is a message acknowledging that change of state.
+
+	* A pending request is a request that has been received but not
+	  yet processed.
+
+   The sequence number has the following rules:
+
+	1. Sequence numbers are handle per-connection.  New connections
+	   will reset the sequence number to zero.
+
+	2. Each new request must have a new sequence number.  The
+	   response to the request will use the same sequence number.
+
+	3. Requests originating from workers are even, requests
+	   originating from the foreman are odd.
+
+	4. Sequence numbers increase monotonically.  The sequence number
+	   of a new request must be greater than both the last request
+	   and the last response to a request.
+
+	5. The sequence number cannot overflow.  If the worker or
+	   foreman reaches its maximum sequence number, it must issue a
+	   RESET message, as explained below.
+
+	6. Sequence numbers should be answered in order:
+
+		* If a request is received, it should be answered before
+		  a new request is made.
+
+		* When waiting for a response to request R:
+
+			a) Any STOP(immed) requests must be answered
+			   immediately.
+
+			b) any requests received with a greater sequence
+			   number than R should be enqueued until the
+			   response to R is received, and then
+			   processed.
+
+			c) any requests received with a lower sequence
+			   number than R should be answered.
+
+		* The queue for holding requests may be finite.
+		  Requests should not be dropped if the queue is
+		  exhausted.  Instead new requests may be replied to
+		  immediately with an ERROR(overflow) and the request
+		  dropped.
+
+		* If an ERROR(overflow) reply is received, the request
+		  may be reissued after one non-error reply to at least
+		  on existing request is received.
+
+5. RESET requests reset the sequence numbering of the connection in case
+   of overflow.
+
+	* Either the worker or the foreman may issue a RESET request.
+
+	* A RESET request msut be issued if an additional request (after
+	  the RESET request) would overflow the sequence number.  A
+	  RESET request may be issued in other circumstances.
+
+	* Once one side issues or receives a RESET request:
+
+		a) No more requests may be issued by that side.
+
+		b) Any unanswered requests with sequence number less
+		   than the RESET request must be answered before the
+		   reply to the RESET is given.
+
+		c) Any unanswered requests with sequence number greater
+		   than the RESET request must be dropped without a reply.
+
+	* The reply to the RESET is another RESET with the same sequence
+	  number.
+
+	* Once the RESET is received and replied to, both sides must
+	  restart the connection as if the connection was new:
+
+		a) Sequence numbers are reset to zero
+
+		b) The first request must be a worker HELLO message to
+		   establish the current worker state
+
+		c) Any requests that were dropped after the RESET must
+		   be resent with new sequence numbers.
+
+6. As a tuple, the parts that vary on the message are: (type,subtype,seq,arg0,rest)
+   The subtype field is currently only used in ERROR messages and holds
+   the error code.
+
    if arg0 is not a sequence of four bytes, it is encoded as little
    endian.
 
@@ -28,83 +137,150 @@ Message types:
 
      Type	Side	arg0
      ---------  ------  ----------------------------------------------------
-     OK		client	number of processors
-     		server	arbitrary number
+     HELLO	worker	length of data for currently-running jobs
+			if no jobs are currently running, arg0 == 0.
 
-     JOB	server	length of job data (msgpack encoded fuq.Task struct)
-     UPDATE	client	length of job update data (msgpack encoded
+     OK		worker	two 16-bit unsigned values: (f1|f2).
+			f1 is the number of jobs running on the node.
+			f2 is the number of processors available
+     		foreman	two 16-bit quantities (f1|f2), used to
+			acknowledge a message from the worker
+
+     JOB	foreman	length of job data (msgpack encoded []fuq.Task list)
+     UPDATE	worker	length of job update data (msgpack encoded
 			fuq.JobStatusUpdate)
 
-     STOP	server	nproc to stop. if 0, stop all.  if 0xFFFFFFFF,
+     STOP	foreman	nproc to stop. if 0, stop all.  if 0xFFFFFFFF,
 			stop everything immediately
 
-     ERROR	both	error code
+     RESET	both	sequence number of last reply
+
+     ERROR	both	interpretation depends on the error code, which
+			is in the subtype field
 
 Conversation description:
 
-Client:
-     one state constant:	max_proc
-     two state variables:	nproc, max_nproc
-     	nproc = max_proc, max_nproc = max_proc
+Worker:
+     state constant:	max_proc
+     state variables:	nrun, nproc, max_nproc
+     	nrun = 0, nproc = max_proc, max_nproc = max_proc
 
      Initial greeting:
 
-     1. wait for OK from server
-     2. send OK(nproc) to server
-     3. wait for OK(nproc) from server
+     1. wait for OK(0) from foreman
+
+     2. send HELLO(nproc|nrun) response to foreman to announce that nrun jobs
+	are running, and which jobs are running
+
+     3. wait for OK(nproc|nrun) response
+
      4. start wait loop
 
-     client_loop:
+     worker_loop:
 
-     1. message from server:
-     	JOB message:
-     		if nproc > job_nproc:
-     			nproc -= job_nproc
-     			start job
-     		else send ERROR(cannot_run_job)
+     1. if nrun == 0 AND nproc == 0, exit
+     2. await event:
 
-     	STOP message:
-     		if stop_immed, exit
-     		else, 	max_nproc = max(0, max_nproc-stop_nstop),
-			goto client_loop
+	     ON receive message from foreman:
+		JOB message:
+			if nproc > job_nproc:
+				nproc -= job_nproc
+				nrun += job_nproc
+				start job
+				reply OK(nrun|nproc)
+			else reply ERROR(no_procs)
 
-     2. Job finishes in client:
-	nproc = min(max_nproc, nproc+job_nproc)
-	send UPDATE(nproc)
-	wait for OK(nproc)
-	if nproc == 0, exit
-	goto client_loop
+		STOP message:
+			if stop_immed, exit
+			else, 	max_nproc = max(0, max_nproc-stop_nstop),
+				goto worker_loop
+				reply OK(0|max_proc)
 
-Server:
+		ERROR message:
+			handle error state.
+
+	     ON job finishes in worker:
+		nproc = min(max_nproc, nproc+job_nproc)
+		nrun -= job_nproc
+		send UPDATE(nrun|nproc)
+		wait for OK(nrun|nproc)
+
+This uses four verbs for messages: receive, reply, send, wait.
+
+
+Note that this ignores the semantics of receive, reply, send, and wait,
+which have some embedded state.
+
+1. If we receive a message while waiting for a reply:
+	a) if the message is STOP(immed), pass the message on
+	b) if 'incoming' holder has a message, reply with ERROR(bad_seq)
+	c) otherwise set 'incoming' holder to the message
+
+2. If we receive a reply:
+	a) process the reply
+	b) if the 'incoming' holder has a message, process the message
+
+3. If we send a message:
+
+2. If we reply to a message:
+	a) 
+
+State:	waiting_reply = false,
+	pending_incoming = nil,
+	pending_outgoing = nil
+
+Receive:
+	if waiting_reply:
+		
+
+Send/wait state:	pending_incoming = nil
+			pending_outgoing = nil
+			sequence = 0 if worker, 
+
+Send(msg):
+	1. If pending_incoming == nil OR seq(pending_incoming) > seq(
+		If pending_incoming(seq)
+		If pending_outgoing != nil:
+			ERROR state
+		Else:
+			pending_outgoing = request
+
+	2. 
+		
+
+Worker send
+
+
+Foreman:
 	Initial greeting:
 
 	1. send OK(0)
-	2. wait for OK(nproc), record nproc for client
+	2. wait for OK(nproc), record nproc for worker
 	3. send OK(nproc)
-	4. start server_loop
+	4. start foreman_loop
 
-	server_loop:
+	foreman_loop:
 
 	1. npending = check for pending tasks (up to nproc)
-	2. if npending > 0, send JOB(npending) to client
+	2. if npending > 0, send JOB(npending) to worker
 
 	3. wait for events
 		on JOB_QUEUED:
-			goto server_loop
-		on client UPDATE(nproc):
+			goto foreman_loop
+		on worker UPDATE(nproc):
 			record task status
-			update nproc for client
-			send OK(nproc) to client
-			goto server_loop
+			update nproc for worker
+			send OK(nproc) to worker
+			goto foreman_loop
 		on STOP_REQUEST(n):
 			send STOP(n)
 		on STOP_IMMED:
 			send STOP(immed)
 		on DISCONNECT:
-			exit server loop
+			exit foreman loop
 
 
-Client states:
+Worker states:
 
 State		Event		Action					Next state
 CL_INIT0	on OK(0)	send OK(nproc)				CL_INIT1
@@ -129,7 +305,7 @@ CL_EXIT0	-		normal exit				-
 CL_EXIT1	-		immediate exit, os.Exit(0)		-
 
 
-Server states:
+Foreman states:
 
 State		Event		Action					Next state
 SV_INIT0	-		send OK(0)				SV_INIT1
@@ -137,17 +313,16 @@ SV_INIT1	on OK(n)	record nproc=n				SV_INIT2
 SV_INIT2	-		send OK(nproc)				SV_LOOP0
 
 SV_LOOP0	-		request npending<=nproc pending tasks	SV_LOOP1
-SV_LOOP1	-		if npending > 0, send JOB(npending)	SV_LOOP2
-				else					SV_LOOP2
+		-		if npending > 0, send JOB(npending)
 
-SV_LOOP2	on JOB_QUEUED	-					SV_LOOP0
-		on UPDATE(n)	record task status, set nproc=n		SV_LOOP3
+SV_LOOP1	on JOB_QUEUED	-					SV_LOOP0
+		on UPDATE(n)	record task status, set nproc=n		SV_LOOP2
 		on STOP_REQ(n)	send STOP(n)				SV_LOOP0
 		on STOP_IMMED	send STOP(immed)			SV_LOOP0
 		on DISCONNECT	-					SV_EXIT
 
-SV_LOOP3	-		send OK(nproc)				SV_LOOP0
+SV_LOOP2	-		send OK(nproc)				SV_LOOP0
 
-SV_EXIT		-		exit server loop
+SV_EXIT		-		exit foreman loop
 
 

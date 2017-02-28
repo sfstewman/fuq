@@ -298,6 +298,37 @@ func (f *Foreman) HandleNodeJobRequest(resp http.ResponseWriter, req *http.Reque
 	f.replyToRequest(resp, req, ni, jobReq)
 }
 
+/*
+func (f *Foreman) http2Convo(resp http.ResponseWriter, req *http.Request, ni fuq.NodeInfo) {
+}
+*/
+
+func (f *Foreman) websocketConvo(hj http.Hijacker, req *http.Request, ni fuq.NodeInfo) error {
+	conn, bufrw, err := hj.Hijack()
+	_ = bufrw
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	return nil
+}
+
+func (f *Foreman) HandleNodeConversation(resp http.ResponseWriter, req *http.Request, ni fuq.NodeInfo) {
+	if req.Proto == "HTTP/2.0" {
+		http.Error(resp, "http/2 support not implemented", http.StatusNotImplemented)
+		return
+	}
+
+	if hj, ok := resp.(http.Hijacker); ok {
+		if err := f.websocketConvo(hj, req, ni); err != nil {
+			http.Error(resp, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	http.Error(resp, "requires http/2 or websocket support", http.StatusInternalServerError)
+}
+
 func (f *Foreman) HandleClientNodeList(resp http.ResponseWriter, req *http.Request, mesg []byte) {
 	nodes, err := f.AllNodes()
 	if err != nil {
