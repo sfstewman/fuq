@@ -1,4 +1,4 @@
-package main
+package proto
 
 import (
 	"context"
@@ -6,11 +6,16 @@ import (
 	"github.com/sfstewman/fuq"
 	"io"
 	"net"
+	"reflect"
 	"runtime"
 	"sync"
 	"testing"
 	// "log"
 )
+
+type nilFlusher struct{}
+
+func (nilFlusher) Flush() {}
 
 type testConvo struct {
 	pworker, pforeman net.Conn
@@ -47,6 +52,12 @@ func newTestConvo() testConvo {
 	tc.syncCh = make(chan struct{})
 
 	return tc
+}
+
+type checkFlusher bool
+
+func (cf *checkFlusher) Flush() {
+	*cf = true
 }
 
 func closeIfNonNil(ch chan struct{}) {
@@ -108,7 +119,7 @@ func TestOnMessage(t *testing.T) {
 	job := fuq.Task{Task: 23, JobDescription: fuq.JobDescription{JobId: fuq.JobId(7)}}
 
 	msg, err := mcf.SendJob([]fuq.Task{job})
-	rnp, rnr, err := msg.okayData()
+	rnp, rnr, err := msg.AsOkay()
 	if err != nil {
 		t.Fatalf("error decoding OK return: %v", err)
 	}
@@ -138,6 +149,183 @@ func TestOnMessage(t *testing.T) {
 	if job != recvJob[0] {
 		t.Errorf("sent job %v, received job %v", job, recvJob[0])
 	}
+}
+
+func checkOK(t *testing.T, m message, nproc0, nrun0 uint16) {
+	nproc, nrun, err := m.AsOkay()
+	if err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+
+	if nproc != nproc0 || nrun != nrun0 {
+		t.Errorf("expected OK(%d|%d), but received OK(%d|%d)",
+			nproc0, nrun0, nproc, nrun)
+	}
+}
+
+func TestSendJob(t *testing.T) {
+	var fl checkFlusher
+
+	tc := newTestConvo()
+	defer tc.Close()
+
+	syncCh, mcw, mcf := tc.syncCh, tc.mcw, tc.mcf
+	received := message{}
+
+	mcf.flusher = &fl
+
+	mcw.OnMessageFunc(MTypeJob, func(msg message) message {
+		received = msg
+		tc.syncCh = nil
+		close(syncCh)
+		return okayMessage(17, 5, msg.Seq)
+	})
+
+	goPanicOnError(mcw.ConversationLoop)
+	goPanicOnError(mcf.ConversationLoop)
+
+	tsend := []fuq.Task{
+		fuq.Task{
+			Task: 6,
+			JobDescription: fuq.JobDescription{
+				JobId:      fuq.JobId(3),
+				Name:       "test_job",
+				NumTasks:   13,
+				WorkingDir: "/home/foo",
+				LoggingDir: "/home/foo/logs",
+				Command:    "/bin/echo",
+				Status:     fuq.Running,
+			},
+		},
+	}
+
+	repl, err := mcf.SendJob(tsend)
+	if err != nil {
+		t.Fatalf("error sending JOB: %v", err)
+	}
+
+	if bool(fl) != true {
+		t.Errorf("flush not called after SendJob")
+	}
+
+	if received.Type != MTypeJob {
+		t.Fatalf("expected job message")
+	}
+
+	trecvPtr, ok := received.Data.(*[]fuq.Task)
+	if !ok {
+		t.Fatalf("expected JOB data, but found: %#v", received.Data)
+	}
+
+	if !reflect.DeepEqual(tsend, *trecvPtr) {
+		t.Errorf("Jobs sent %v disagree with jobs received %v", tsend, *trecvPtr)
+	}
+
+	checkOK(t, repl, 17, 5)
+}
+
+func TestSendUpdate(t *testing.T) {
+	var fl checkFlusher
+
+	tc := newTestConvo()
+	defer tc.Close()
+
+	syncCh, mcw, mcf := tc.syncCh, tc.mcw, tc.mcf
+	received := message{}
+
+	mcw.flusher = &fl
+
+	mcf.OnMessageFunc(MTypeUpdate, func(msg message) message {
+		received = msg
+		tc.syncCh = nil
+		close(syncCh)
+		return okayMessage(12, 3, msg.Seq)
+	})
+
+	goPanicOnError(mcw.ConversationLoop)
+	goPanicOnError(mcf.ConversationLoop)
+
+	usend := fuq.JobStatusUpdate{
+		JobId:   fuq.JobId(7),
+		Task:    8,
+		Success: true,
+		Status:  "done",
+	}
+
+	resp, err := mcw.SendUpdate(usend)
+	if err != nil {
+		t.Fatalf("error sending UPDATE: %v", err)
+	}
+	if bool(fl) != true {
+		t.Errorf("flush not called after SendUpdate")
+	}
+
+	// channel sync: make sure received is set
+	<-syncCh
+
+	if received.Type != MTypeUpdate {
+		t.Fatalf("expected job update message")
+	}
+
+	urecvPtr, ok := received.Data.(*fuq.JobStatusUpdate)
+	if !ok {
+		t.Fatalf("expected job update data, but found: %#v", received.Data)
+	}
+
+	if !reflect.DeepEqual(usend, *urecvPtr) {
+		t.Errorf("UPDATE received, but update = %v, expected %v", *urecvPtr, usend)
+	}
+
+	checkOK(t, resp, 12, 3)
+}
+
+func TestSendStop(t *testing.T) {
+	var fl checkFlusher
+
+	tc := newTestConvo()
+	defer tc.Close()
+
+	syncCh, mcw, mcf := tc.syncCh, tc.mcw, tc.mcf
+	received := message{}
+
+	mcf.flusher = &fl
+
+	mcw.OnMessageFunc(MTypeStop, func(msg message) message {
+		received = msg
+		tc.syncCh = nil
+		close(syncCh)
+		return okayMessage(4, 3, msg.Seq)
+	})
+
+	goPanicOnError(mcw.ConversationLoop)
+	goPanicOnError(mcf.ConversationLoop)
+
+	resp, err := mcf.SendStop(3)
+	if err != nil {
+		t.Fatalf("error sending STOP(3): %v", err)
+	}
+
+	if bool(fl) != true {
+		t.Errorf("flush not called after SendStop")
+	}
+
+	// channel sync: make sure received is set
+	<-syncCh
+
+	if received.Type != MTypeStop {
+		t.Fatalf("expected stop message")
+	}
+
+	nstop, err := received.AsStop()
+	if err != nil {
+		t.Fatalf("error decoding stop data: %#v", err)
+	}
+
+	if nstop != 3 {
+		t.Errorf("STOP received, but nproc = %d, expected %d", nstop, 3)
+	}
+
+	checkOK(t, resp, 4, 3)
 }
 
 func TestSecondSendBlocksUntilReply(t *testing.T) {

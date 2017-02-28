@@ -1,11 +1,9 @@
-package main
+package proto
 
 import (
 	"context"
 	"fmt"
 	"github.com/sfstewman/fuq"
-	"gopkg.in/vmihailenco/msgpack.v2"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -127,80 +125,26 @@ func (mc *MultiConvo) sendShortMessage(mt MType, arg0 uint32) (uint32, error) {
 	return seq, err
 }
 
-func (mc *MultiConvo) send(mt MType, seq uint32, data interface{}) error {
+func (mc *MultiConvo) xmit(mt MType, seq uint32, data interface{}) error {
 	dt := mc.Timeout
 	conn := mc.conn
 
 	t := time.Now()
 	conn.SetWriteDeadline(t.Add(dt))
 
-	switch mt {
-	case MTypeOK, MTypeStop, MTypeReset:
-		arg0 := data.(uint32)
-		return mt.encodeShort(mc.conn, seq, arg0)
-
-	case MTypeError:
-		errData := data.(mtErrorData)
-		return mt.encodeError(mc.conn, seq, errData.Errcode, errData.Arg0)
-
-	case MTypeHello, MTypeJob, MTypeUpdate:
-		return mt.encode(mc.conn, seq, data)
-
-	default:
-		return fmt.Errorf("unknown message type 0x%4x (%s)", mt)
-	}
-}
-
-func (mc *MultiConvo) sendMessage(data sendData) (seq uint32, err error) {
-	seq = mc.nextSeq()
-	err = mc.send(data.MType, seq, data.Data)
-	return
-}
-
-func receiveMessage(r io.Reader) (message, error) {
-	var raw []byte
-	var m message
-
-	h, err := recvHdr(r)
+	err := mt.Send(conn, seq, data)
 	if err != nil {
-		return m, fmt.Errorf("error receiving message header: %v", err)
+		return err
 	}
 
-	// log.Printf("==> INCOMING: msg %d: %v", h.seq, h)
+	mc.flusher.Flush()
+	return nil
+}
 
-	switch h.mtype {
-	case MTypeOK, MTypeStop, MTypeError, MTypeReset:
-		m.Data = h.arg0
-
-	case MTypeHello:
-		m.Data = &HelloData{}
-		raw = make([]byte, h.arg0)
-	case MTypeJob:
-		m.Data = &[]fuq.Task{}
-		raw = make([]byte, h.arg0)
-	case MTypeUpdate:
-		m.Data = &fuq.JobStatusUpdate{}
-		raw = make([]byte, h.arg0)
-	default:
-		return m, fmt.Errorf("unknown message type 0x%4x", h.mtype)
-	}
-
-	m.Type = h.mtype
-	m.Seq = h.seq
-
-	if len(raw) == 0 {
-		return m, nil
-	}
-
-	if _, err := io.ReadFull(r, raw); err != nil {
-		return m, fmt.Errorf("error reading message data: %v", err)
-	}
-
-	if err := msgpack.Unmarshal(raw, m.Data); err != nil {
-		return m, fmt.Errorf("error unmarshaling message data: %v", err)
-	}
-
-	return m, nil
+func (mc *MultiConvo) xmitMessage(data sendData) (seq uint32, err error) {
+	seq = mc.nextSeq()
+	err = mc.xmit(data.MType, seq, data.Data)
+	return
 }
 
 func (mc *MultiConvo) Close() {
@@ -244,7 +188,7 @@ func (mc *MultiConvo) incomingLoop(msgCh chan<- message, errorCh chan<- reply, d
 		t := time.Now()
 		conn.SetReadDeadline(t.Add(dt))
 
-		msg, err := receiveMessage(conn)
+		msg, err := ReceiveMessage(conn)
 
 		// even if there's an error, we need to update the sequence number
 		mc.updateSeq(msg.Seq)
@@ -299,7 +243,7 @@ func (mc *MultiConvo) dispatchMessage(m message) error {
 
 	resp.Seq = seq
 	// log.Printf("%p --> MD: sending response %#v", mc, resp)
-	err := mc.send(resp.Type, seq, resp.Data)
+	err := mc.xmit(resp.Type, seq, resp.Data)
 	if err != nil {
 		return err
 	}
@@ -338,7 +282,7 @@ recv_loop:
 
 		select {
 		case msg := <-sendCh:
-			seq, err := mc.sendMessage(msg)
+			seq, err := mc.xmitMessage(msg)
 			if err != nil {
 				msg.Reply <- reply{E: err}
 				continue
@@ -408,11 +352,9 @@ recv_loop:
 	return nil
 }
 
-func (mc *MultiConvo) SendJob(job []fuq.Task) (message, error) {
-	// log.Printf("sending jobs %#v", job)
-
+func (mc *MultiConvo) sendMessage(mt MType, data interface{}) (message, error) {
 	replyCh := make(chan reply)
-	mc.sendCh <- sendData{MTypeJob, &job, replyCh}
+	mc.sendCh <- sendData{mt, data, replyCh}
 
 	select {
 	case repl := <-replyCh:
@@ -423,15 +365,23 @@ func (mc *MultiConvo) SendJob(job []fuq.Task) (message, error) {
 	}
 }
 
-func (mc *MultiConvo) SendUpdate(update fuq.JobStatusUpdate) (message, error) {
-	replyCh := make(chan reply)
-	mc.sendCh <- sendData{MTypeUpdate, &update, replyCh}
+func (mc *MultiConvo) SendJob(job []fuq.Task) (message, error) {
+	return mc.sendMessage(MTypeJob, &job)
+}
 
-	select {
-	case repl := <-replyCh:
-		// log.Printf("reply: %v", repl)
-		return repl.M, repl.E
-	case <-mc.ctx.Done():
-		return message{}, mc.ctx.Err()
-	}
+func (mc *MultiConvo) SendUpdate(update fuq.JobStatusUpdate) (message, error) {
+	return mc.sendMessage(MTypeUpdate, &update)
+}
+
+func (mc *MultiConvo) SendStop(nproc uint32) (message, error) {
+	return mc.sendMessage(MTypeStop, nproc)
+}
+
+func (mc *MultiConvo) SendStopImmed() error {
+	_, err := mc.sendMessage(MTypeStop, StopImmed)
+	return err
+}
+
+func (mc *MultiConvo) SendHello(hello HelloData) (message, error) {
+	return mc.sendMessage(MTypeHello, &hello)
 }
