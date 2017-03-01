@@ -130,7 +130,7 @@ func (h *header) Decode(buf []byte) error {
 	return nil
 }
 
-func recvHdr(r io.Reader) (header, error) {
+func receiveHeader(r io.Reader) (header, error) {
 	var data [16]byte
 	var hdr header
 
@@ -144,19 +144,31 @@ func recvHdr(r io.Reader) (header, error) {
 }
 
 func (m message) Send(w io.Writer) error {
-	return m.Type.Send(w, m.Seq, m.Data)
+	switch mt := m.Type; mt {
+	case MTypeOK, MTypeStop, MTypeReset:
+		arg0 := m.Data.(uint32)
+		return m.encodeShort(w, arg0)
+
+	case MTypeError:
+		errData := m.Data.(mtErrorData)
+		return m.encodeError(w, errData)
+
+	case MTypeHello, MTypeJob, MTypeUpdate:
+		return m.encodeData(w)
+
+	default:
+		return fmt.Errorf("unknown message type 0x%02x (%s)", byte(mt), mt)
+	}
 }
 
 func ReceiveMessage(r io.Reader) (message, error) {
 	var raw []byte
 	var m message
 
-	h, err := recvHdr(r)
+	h, err := receiveHeader(r)
 	if err != nil {
 		return m, fmt.Errorf("error receiving message header: %v", err)
 	}
-
-	// log.Printf("==> INCOMING: msg %d: %v", h.seq, h)
 
 	switch h.mtype {
 	case MTypeOK, MTypeStop, MTypeError, MTypeReset:
@@ -172,7 +184,7 @@ func ReceiveMessage(r io.Reader) (message, error) {
 		m.Data = &fuq.JobStatusUpdate{}
 		raw = make([]byte, h.arg0)
 	default:
-		return m, fmt.Errorf("unknown message type 0x%4x", h.mtype)
+		return m, fmt.Errorf("unknown message type 0x%02x", h.mtype)
 	}
 
 	m.Type = h.mtype
@@ -191,4 +203,62 @@ func ReceiveMessage(r io.Reader) (message, error) {
 	}
 
 	return m, nil
+}
+
+func (m message) encodeShort(w io.Writer, arg0 uint32) error {
+	h := header{
+		mtype: m.Type,
+		seq:   m.Seq,
+		arg0:  arg0,
+	}
+
+	// log.Printf("%s.encodeShort(%v, %d, %d)", m, w, seq, arg0)
+	return h.Encode(w)
+}
+
+func (m message) encodeError(w io.Writer, errData mtErrorData) error {
+	h := header{
+		mtype:   m.Type,
+		errcode: errData.Errcode,
+		seq:     m.Seq,
+		arg0:    errData.Arg0,
+	}
+	return h.Encode(w)
+}
+
+func (m message) encodeData(w io.Writer) error {
+	var encoded []byte
+
+	if m.Data != nil {
+		var err error
+		encoded, err = msgpack.Marshal(m.Data)
+		if err != nil {
+			return fmt.Errorf("error encoding data for type %s: %v", m.Type, err)
+		}
+	}
+
+	return m.rawSend(w, encoded)
+}
+
+func (m message) rawSend(w io.Writer, data []byte) error {
+	if len(data) > maxDataSize {
+		return fmt.Errorf("length of message is %d, exceeds 32-bits", len(data))
+	}
+
+	h := header{
+		mtype: m.Type,
+		seq:   m.Seq,
+		arg0:  uint32(len(data)),
+	}
+
+	if err := h.Encode(w); err != nil {
+		return err
+	}
+
+	if data == nil {
+		return nil
+	}
+
+	_, err := writeAll(w, data)
+	return err
 }

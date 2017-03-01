@@ -39,14 +39,14 @@ func newTestConvo() testConvo {
 		Conn:    tc.pworker,
 		Flusher: nilFlusher{},
 		Context: ctx,
-		Client:  true,
+		Worker:  true,
 	})
 
 	tc.mcf = NewMultiConvo(MultiConvoOpts{
 		Conn:    tc.pforeman,
 		Flusher: nilFlusher{},
 		Context: ctx,
-		Client:  false,
+		Worker:  false,
 	})
 
 	tc.syncCh = make(chan struct{})
@@ -54,10 +54,27 @@ func newTestConvo() testConvo {
 	return tc
 }
 
-type checkFlusher bool
+type checkFlusher struct {
+	signal  chan struct{}
+	flushed bool
+}
+
+func newCheckFlusher() *checkFlusher {
+	cf := &checkFlusher{
+		signal: make(chan struct{}),
+	}
+
+	return cf
+}
 
 func (cf *checkFlusher) Flush() {
-	*cf = true
+	cf.flushed = true
+	close(cf.signal)
+}
+
+func (cf *checkFlusher) IsFlushed() bool {
+	<-cf.signal
+	return cf.flushed
 }
 
 func closeIfNonNil(ch chan struct{}) {
@@ -76,8 +93,6 @@ func (t *testConvo) Close() {
 	// first shut down Done channels
 	t.cancelFunc()
 	t.mcf.Close()
-	// closeIfNonNil(t.mcf.Done)
-	// closeIfNonNil(t.mcw.Done)
 
 	// shut down sync channel
 	closeIfNonNil(t.syncCh)
@@ -164,7 +179,7 @@ func checkOK(t *testing.T, m message, nproc0, nrun0 uint16) {
 }
 
 func TestSendJob(t *testing.T) {
-	var fl checkFlusher
+	fl := newCheckFlusher()
 
 	tc := newTestConvo()
 	defer tc.Close()
@@ -172,7 +187,7 @@ func TestSendJob(t *testing.T) {
 	syncCh, mcw, mcf := tc.syncCh, tc.mcw, tc.mcf
 	received := message{}
 
-	mcf.flusher = &fl
+	mcf.flusher = fl
 
 	mcw.OnMessageFunc(MTypeJob, func(msg message) message {
 		received = msg
@@ -204,7 +219,7 @@ func TestSendJob(t *testing.T) {
 		t.Fatalf("error sending JOB: %v", err)
 	}
 
-	if bool(fl) != true {
+	if !fl.IsFlushed() {
 		t.Errorf("flush not called after SendJob")
 	}
 
@@ -225,7 +240,7 @@ func TestSendJob(t *testing.T) {
 }
 
 func TestSendUpdate(t *testing.T) {
-	var fl checkFlusher
+	fl := newCheckFlusher()
 
 	tc := newTestConvo()
 	defer tc.Close()
@@ -233,7 +248,7 @@ func TestSendUpdate(t *testing.T) {
 	syncCh, mcw, mcf := tc.syncCh, tc.mcw, tc.mcf
 	received := message{}
 
-	mcw.flusher = &fl
+	mcw.flusher = fl
 
 	mcf.OnMessageFunc(MTypeUpdate, func(msg message) message {
 		received = msg
@@ -256,7 +271,7 @@ func TestSendUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error sending UPDATE: %v", err)
 	}
-	if bool(fl) != true {
+	if !fl.IsFlushed() {
 		t.Errorf("flush not called after SendUpdate")
 	}
 
@@ -280,7 +295,7 @@ func TestSendUpdate(t *testing.T) {
 }
 
 func TestSendStop(t *testing.T) {
-	var fl checkFlusher
+	fl := newCheckFlusher()
 
 	tc := newTestConvo()
 	defer tc.Close()
@@ -288,7 +303,7 @@ func TestSendStop(t *testing.T) {
 	syncCh, mcw, mcf := tc.syncCh, tc.mcw, tc.mcf
 	received := message{}
 
-	mcf.flusher = &fl
+	mcf.flusher = fl
 
 	mcw.OnMessageFunc(MTypeStop, func(msg message) message {
 		received = msg
@@ -305,7 +320,7 @@ func TestSendStop(t *testing.T) {
 		t.Fatalf("error sending STOP(3): %v", err)
 	}
 
-	if bool(fl) != true {
+	if !fl.IsFlushed() {
 		t.Errorf("flush not called after SendStop")
 	}
 
@@ -323,6 +338,65 @@ func TestSendStop(t *testing.T) {
 
 	if nstop != 3 {
 		t.Errorf("STOP received, but nproc = %d, expected %d", nstop, 3)
+	}
+
+	checkOK(t, resp, 4, 3)
+}
+
+func TestSendHello(t *testing.T) {
+	flw := newCheckFlusher()
+	flf := newCheckFlusher()
+
+	tc := newTestConvo()
+	defer tc.Close()
+
+	syncCh, mcw, mcf := tc.syncCh, tc.mcw, tc.mcf
+	received := message{}
+
+	mcf.flusher = flf
+	mcw.flusher = flw
+
+	mcf.OnMessageFunc(MTypeHello, func(msg message) message {
+		received = msg
+		tc.syncCh = nil
+		close(syncCh)
+		return okayMessage(4, 3, msg.Seq)
+	})
+
+	goPanicOnError(mcw.ConversationLoop)
+	goPanicOnError(mcf.ConversationLoop)
+
+	hello := HelloData{NumProcs: 11}
+	resp, err := mcw.SendHello(hello)
+	if err != nil {
+		t.Fatalf("error sending STOP(3): %v", err)
+	}
+	// log.Printf("received response: %v", resp)
+
+	if !flw.IsFlushed() {
+		t.Errorf("flush not called after SendHello")
+	}
+
+	// channel sync: make sure received is set
+	<-syncCh
+
+	if flushed := flf.IsFlushed(); !flushed {
+		// log.Printf("checked flusher %p: %v %v\n", flf, flf.IsFlushed(), flushed)
+		// t.Logf("checked flusher %p: %v %v\n", flf, flf.IsFlushed(), flushed)
+		t.Errorf("flush not called after replying to Hello")
+	}
+
+	if received.Type != MTypeHello {
+		t.Fatalf("expected stop message")
+	}
+
+	hrecvPtr, ok := received.Data.(*HelloData)
+	if !ok {
+		t.Fatalf("expected hello data, but found: %#v", received.Data)
+	}
+
+	if !reflect.DeepEqual(hello, *hrecvPtr) {
+		t.Errorf("HELLO received, but update = %v, expected %v", *hrecvPtr, hello)
 	}
 
 	checkOK(t, resp, 4, 3)
@@ -430,11 +504,11 @@ func TestSecondSendBlocksUntilReply(t *testing.T) {
 
 func TestHoldMessageUntilReply(t *testing.T) {
 	var (
-		order       chan int      = make(chan int, 4)
-		sendWait    chan struct{} = make(chan struct{})
-		recvWait    chan struct{} = make(chan struct{})
-		recvSignal1 chan struct{} = make(chan struct{})
-		recvSignal2 chan struct{} = make(chan struct{})
+		order       = make(chan int, 4)
+		sendWait    = make(chan struct{})
+		recvWait    = make(chan struct{})
+		recvSignal1 = make(chan struct{})
+		recvSignal2 = make(chan struct{})
 	)
 
 	tc := newTestConvo()
@@ -521,10 +595,30 @@ func TestHoldMessageUntilReply(t *testing.T) {
 	r3 := <-order
 	r4 := <-order
 
-	if r1 != 3 || r2 != 1 || r3 != 4 || r4 != 2 {
-		t.Errorf("reply order should be 3,1,4,2.  found %d,%d,%d,%d",
-			r1, r2, r3, r4)
+	// two orderings should be possible:
+	// 	1. [3] mcw receives job
+	// 	2. [1] mcf receives rsponse
+	// 	3. [4] mcf receives update
+	// 	4. [2] mcw receives rsponse
+	// OR
+	// 	1. [3] mcw receives job
+	// 	2. [4] mcf receives update
+	// 	3. [1] mcf receives rsponse
+	// 	4. [2] mcw receives rsponse
+	//
+
+	if r1 == 3 && r2 == 1 && r3 == 4 && r4 == 2 {
+		/* okay */
+		return
 	}
+
+	if r1 == 3 && r2 == 4 && r3 == 1 && r4 == 2 {
+		/* okay */
+		return
+	}
+
+	t.Errorf("reply order should be 3,1,4,2 or 3,4,1,2.  found %d,%d,%d,%d",
+		r1, r2, r3, r4)
 }
 
 func TestSequencesAreIncreasing(t *testing.T) {

@@ -25,36 +25,22 @@ type reply struct {
 	E error
 }
 
-type sendData struct {
-	MType MType
-	Data  interface{}
-	Reply chan<- reply
+type outgoingMessage struct {
+	M message
+	R chan<- reply
 }
 
 type MultiConvo struct {
 	conn     net.Conn
 	flusher  http.Flusher
 	seq      Sequencer
-	isClient bool
+	isWorker bool
 
 	ctx context.Context
 
 	handlers [256]MessageHandler
 
-	sendCh chan sendData
-	/*
-		c        *Convo
-		Done     chan struct{}
-
-		sendLock sync.Mutex
-
-		pending struct {
-			sync.Mutex
-			isWaiting bool
-			waitingOn uint32
-			waitingCh chan<- message
-		}
-	*/
+	outgoingCh chan outgoingMessage
 
 	Timeout time.Duration
 }
@@ -63,40 +49,23 @@ type MultiConvoOpts struct {
 	Conn    net.Conn
 	Flusher http.Flusher
 	Context context.Context
-	Client  bool
+	Worker  bool
 }
 
 func NewMultiConvo(opts MultiConvoOpts) *MultiConvo {
-	/*
-		ws := newWriterSend(conn, fl)
-		rr := readerRecv{conn}
-		c := &Convo{
-			r:   rr,
-			s:   ws,
-			Seq: seq,
-		}
-
-		return &MultiConvo{
-			conn:    conn,
-			c:       c,
-			Done:    make(chan struct{}),
-			Timeout: 2 * time.Second,
-		}
-	*/
-
 	return &MultiConvo{
-		conn:     opts.Conn,
-		flusher:  opts.Flusher,
-		seq:      &LockedSequence{},
-		isClient: opts.Client,
-		ctx:      opts.Context,
-		sendCh:   make(chan sendData),
+		conn:       opts.Conn,
+		flusher:    opts.Flusher,
+		seq:        &LockedSequence{},
+		isWorker:   opts.Worker,
+		ctx:        opts.Context,
+		outgoingCh: make(chan outgoingMessage),
 	}
 }
 
 func (mc *MultiConvo) nextSeq() uint32 {
 	s := mc.seq.Next() << 1
-	if !mc.isClient {
+	if !mc.isWorker {
 		s = s | 0x1
 	}
 	return s
@@ -113,37 +82,26 @@ func (mc *MultiConvo) updateSeq(new uint32) {
 	mc.seq.Update(new + 1)
 }
 
-func (mc *MultiConvo) sendDataMessage(mt MType, data interface{}) (uint32, error) {
-	seq := mc.nextSeq()
-	err := mt.encode(mc.conn, seq, data)
-	return seq, err
-}
-
-func (mc *MultiConvo) sendShortMessage(mt MType, arg0 uint32) (uint32, error) {
-	seq := mc.nextSeq()
-	err := mt.encodeShort(mc.conn, seq, arg0)
-	return seq, err
-}
-
-func (mc *MultiConvo) xmit(mt MType, seq uint32, data interface{}) error {
+func (mc *MultiConvo) xmit(m message) error {
 	dt := mc.Timeout
 	conn := mc.conn
 
 	t := time.Now()
 	conn.SetWriteDeadline(t.Add(dt))
 
-	err := mt.Send(conn, seq, data)
-	if err != nil {
+	if err := m.Send(conn); err != nil {
+		// log.Printf("%p --> MD error sending %v: %v", m, err)
 		return err
 	}
+	defer mc.flusher.Flush()
 
-	mc.flusher.Flush()
 	return nil
 }
 
-func (mc *MultiConvo) xmitMessage(data sendData) (seq uint32, err error) {
+func (mc *MultiConvo) xmitWithSeq(m message) (seq uint32, err error) {
 	seq = mc.nextSeq()
-	err = mc.xmit(data.MType, seq, data.Data)
+	m.Seq = seq
+	err = mc.xmit(m)
 	return
 }
 
@@ -194,7 +152,17 @@ func (mc *MultiConvo) incomingLoop(msgCh chan<- message, errorCh chan<- reply, d
 		mc.updateSeq(msg.Seq)
 
 		if err != nil {
+
+			select {
+			case <-done:
+				// ignore error
+				return
+			default:
+				/* report error */
+			}
+
 			// check done channel before setting error
+			log.Printf("error in incoming loop: %#v", err)
 			select {
 			case <-done:
 			case errorCh <- reply{msg, err}:
@@ -243,17 +211,12 @@ func (mc *MultiConvo) dispatchMessage(m message) error {
 
 	resp.Seq = seq
 	// log.Printf("%p --> MD: sending response %#v", mc, resp)
-	err := mc.xmit(resp.Type, seq, resp.Data)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return mc.xmit(resp)
 }
 
 func (mc *MultiConvo) ConversationLoop() error {
 	var (
-		sendCh chan sendData
+		outgoingCh chan outgoingMessage
 
 		waitingSeq uint32
 		replyCh    chan<- reply
@@ -274,22 +237,22 @@ func (mc *MultiConvo) ConversationLoop() error {
 
 recv_loop:
 	for {
-		sendCh = nil
+		outgoingCh = nil
 		if replyCh == nil {
-			sendCh = mc.sendCh
+			outgoingCh = mc.outgoingCh
 		}
 		done := mc.ctx.Done()
 
 		select {
-		case msg := <-sendCh:
-			seq, err := mc.xmitMessage(msg)
+		case msg := <-outgoingCh:
+			seq, err := mc.xmitWithSeq(msg.M)
 			if err != nil {
-				msg.Reply <- reply{E: err}
+				msg.R <- reply{E: err}
 				continue
 			}
 
 			waitingSeq = seq
-			replyCh = msg.Reply
+			replyCh = msg.R
 
 		case msg, ok := <-incomingCh:
 			if !ok {
@@ -353,8 +316,9 @@ recv_loop:
 }
 
 func (mc *MultiConvo) sendMessage(mt MType, data interface{}) (message, error) {
+	m := message{Type: mt, Data: data}
 	replyCh := make(chan reply)
-	mc.sendCh <- sendData{mt, data, replyCh}
+	mc.outgoingCh <- outgoingMessage{M: m, R: replyCh}
 
 	select {
 	case repl := <-replyCh:

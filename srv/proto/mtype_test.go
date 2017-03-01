@@ -25,14 +25,7 @@ func TestOkayMessage(t *testing.T) {
 			2, incoming.Seq)
 	}
 
-	nproc, nrun, err := incoming.AsOkay()
-	if err != nil {
-		t.Fatalf("error waiting for OK: %v", err)
-	}
-
-	if nproc != 17 || nrun != 0 {
-		t.Errorf("OK(n|r) received, but (n|r) = (%d|%d), expected (17|0)", nproc, nrun)
-	}
+	checkOK(t, incoming, 17, 0)
 
 	/* check receiving with ReceiveMessage() */
 	msg = okayMessage(5, 11, 3)
@@ -50,14 +43,7 @@ func TestOkayMessage(t *testing.T) {
 			2, incoming.Seq)
 	}
 
-	nproc, nrun, err = incoming.AsOkay()
-	if err != nil {
-		t.Fatalf("error waiting for OK: %v", err)
-	}
-
-	if nproc != 5 || nrun != 11 {
-		t.Errorf("OK(n|r) received, but (n|r) = (%d|%d), expected (5|11)", nproc, nrun)
-	}
+	checkOK(t, incoming, 5, 11)
 
 	// Check arg0 encoding explicitly
 	arg, ok := incoming.Data.(uint32)
@@ -65,8 +51,8 @@ func TestOkayMessage(t *testing.T) {
 		t.Fatalf("expected OK data, but found: %#v", incoming.Data)
 	}
 
-	nproc = uint16(arg >> 16)
-	nrun = uint16(arg & 0xffff)
+	nproc := uint16(arg >> 16)
+	nrun := uint16(arg & 0xffff)
 
 	if nproc != 5 || nrun != 11 {
 		t.Errorf("OK(n|r) received, but (n|r) = (%d|%d), expected (5|11)", nproc, nrun)
