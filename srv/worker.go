@@ -1,9 +1,8 @@
-package main
+package srv
 
 import (
 	"fmt"
 	"github.com/sfstewman/fuq"
-	"github.com/sfstewman/fuq/srv"
 	"log"
 	"math/rand"
 	"net"
@@ -139,7 +138,7 @@ func (wc *WorkerConfig) NewCookie(ep *fuq.Endpoint) error {
 		NodeInfo: wc.NodeInfo,
 	}
 
-	ret := srv.HelloResponseEnv{
+	ret := HelloResponseEnv{
 		Name:   &wc.NodeInfo.UniqName,
 		Cookie: &wc.Cookie,
 	}
@@ -207,13 +206,13 @@ func (wc *WorkerConfig) RefreshCookie(ep *fuq.Endpoint, oldCookie fuq.Cookie) er
 		NodeInfo: wc.NodeInfo,
 	}
 
-	req := srv.NodeRequestEnvelope{
+	req := NodeRequestEnvelope{
 		Cookie: wc.Cookie,
 		Msg:    &hello,
 	}
 
 	name := ""
-	ret := srv.HelloResponseEnv{
+	ret := HelloResponseEnv{
 		Name:   &name,
 		Cookie: &wc.Cookie,
 	}
@@ -288,7 +287,7 @@ func (w *Worker) Log(format string, args ...interface{}) {
 func (w *Worker) RequestAction(nproc int) (interface{}, error) {
 	cookie := w.Cookie()
 
-	req := srv.NodeRequestEnvelope{
+	req := NodeRequestEnvelope{
 		Cookie: cookie,
 		Msg: fuq.JobRequest{
 			NumProc: nproc,
@@ -342,7 +341,7 @@ func (w *Worker) UpdateAndRequestAction(status fuq.JobStatusUpdate, nproc int) (
 		status.NewJob = &fuq.JobRequest{NumProc: nproc}
 	}
 
-	req := srv.NodeRequestEnvelope{
+	req := NodeRequestEnvelope{
 		Cookie: w.Cookie(),
 		Msg:    &status,
 	}
