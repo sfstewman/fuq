@@ -29,13 +29,6 @@ import (
 	"time"
 )
 
-/*
-import (
-	"net/http"
-	_ "net/http/pprof"
-)
-*/
-
 type RefreshCookieAction struct{}
 
 type WaitAction struct {
@@ -682,7 +675,7 @@ func main() {
 		log.Printf("Starting foreman")
 
 		go func() {
-			f, err := NewForeman(config, done)
+			f, err := srv.NewForeman(config, done)
 			defer close(done)
 
 			if err != nil {

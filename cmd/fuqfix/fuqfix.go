@@ -2,18 +2,18 @@ package main
 
 import (
 	"flag"
-	"github.com/sfstewman/fuq/srv"
+	"github.com/sfstewman/fuq/db"
 	"log"
 )
 
 func fixupDatabase(dbPath string) error {
-	d, err := srv.NewJobStore(dbPath)
+	d, err := db.NewJobStore(dbPath)
 	if err != nil {
 		return err
 	}
 	defer d.Close()
 
-	if err := srv.Fsck(d); err != nil {
+	if err := db.Fsck(d); err != nil {
 		return err
 	}
 

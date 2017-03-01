@@ -1,4 +1,4 @@
-package srv
+package db
 
 import (
 	"bytes"
@@ -12,20 +12,11 @@ import (
 	"log"
 )
 
-type CookieMaker interface {
-	IsUniqueName(n string) (bool, error)
-	MakeCookie(ni fuq.NodeInfo) (fuq.Cookie, error)
-	RenewCookie(ni fuq.NodeInfo) (fuq.Cookie, error)
-	ExpireCookie(c fuq.Cookie) error
-	Lookup(c fuq.Cookie) (fuq.NodeInfo, error)
-	AllNodes() ([]fuq.NodeInfo, error)
-}
-
 type CookieJar struct {
 	db *bolt.DB
 }
 
-var _ CookieMaker = (*CookieJar)(nil)
+var _ fuq.CookieMaker = (*CookieJar)(nil)
 
 func NewCookieJar(jarPath string) (*CookieJar, error) {
 	db, err := bolt.Open(jarPath, 0666, nil)

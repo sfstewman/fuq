@@ -1,10 +1,10 @@
-package main
+package srv
 
 import (
 	"encoding/json"
 	"fmt"
 	"github.com/sfstewman/fuq"
-	"github.com/sfstewman/fuq/srv"
+	"github.com/sfstewman/fuq/db"
 	"golang.org/x/net/http2"
 	"log"
 	"net/http"
@@ -13,9 +13,9 @@ import (
 )
 
 type Foreman struct {
-	srv.JobQueuer
-	srv.CookieMaker
-	stores *srv.Stores
+	db.JobQueuer
+	fuq.CookieMaker
+	stores *db.Stores
 
 	// XXX: worth replacing with something that can scale?
 	// we need to lock the database with every request; should
@@ -39,7 +39,7 @@ func (f *Foreman) Close() error {
 }
 
 func NewForeman(config fuq.Config, done chan<- struct{}) (*Foreman, error) {
-	stores, err := srv.NewStores(srv.Files{Jobs: config.DbPath})
+	stores, err := db.NewStores(db.Files{Jobs: config.DbPath})
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +116,7 @@ func (f *Foreman) HandleHello(resp http.ResponseWriter, req *http.Request) {
 
 func (f *Foreman) HandleNodeReauth(resp http.ResponseWriter, req *http.Request) {
 	hello := fuq.Hello{}
-	envelope := srv.NodeRequestEnvelope{Msg: &hello}
+	envelope := NodeRequestEnvelope{Msg: &hello}
 
 	dec := json.NewDecoder(req.Body)
 	if err := dec.Decode(&envelope); err != nil {
@@ -163,7 +163,7 @@ func (f *Foreman) HandleNodeReauth(resp http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	srv.RespondWithJSON(resp, &struct {
+	RespondWithJSON(resp, &struct {
 		Name   string
 		Cookie fuq.Cookie
 	}{ni.UniqName, cookie})
@@ -211,7 +211,7 @@ func (f *Foreman) replyWithShutdown(resp http.ResponseWriter, req *http.Request)
 		},
 	}
 
-	srv.RespondWithJSON(resp, repl)
+	RespondWithJSON(resp, repl)
 }
 
 func (f *Foreman) replyToRequest(resp http.ResponseWriter, req *http.Request, ni fuq.NodeInfo, jobReq fuq.JobRequest) {
@@ -248,7 +248,7 @@ func (f *Foreman) replyToRequest(resp http.ResponseWriter, req *http.Request, ni
 					t.JobId, t.Name, t.Task, ni.UniqName)
 			}
 
-			srv.RespondWithJSON(resp, tasks)
+			RespondWithJSON(resp, tasks)
 			return
 		}
 
@@ -269,7 +269,7 @@ func (f *Foreman) replyToRequest(resp http.ResponseWriter, req *http.Request, ni
 		select {
 		case <-ctx.Done():
 			log.Printf("request %p canceled from node %s", req, ni.UniqName)
-			srv.RespondWithJSON(resp, tasks)
+			RespondWithJSON(resp, tasks)
 		case <-jobsAvail:
 			log.Printf("trying to queue jobs for node %s", ni.UniqName)
 			continue
@@ -337,7 +337,7 @@ func (f *Foreman) HandleClientNodeList(resp http.ResponseWriter, req *http.Reque
 		return
 	}
 
-	srv.RespondWithJSON(resp, &nodes)
+	RespondWithJSON(resp, &nodes)
 }
 
 func (f *Foreman) HandleClientNodeShutdown(resp http.ResponseWriter, req *http.Request, mesg []byte) {
@@ -366,7 +366,7 @@ func (f *Foreman) HandleClientNodeShutdown(resp http.ResponseWriter, req *http.R
 	// keep waiting until a job is queued...
 	f.WakeupListeners()
 
-	srv.RespondWithJSON(resp, struct{ ok bool }{true})
+	RespondWithJSON(resp, struct{ ok bool }{true})
 }
 
 func (f *Foreman) HandleClientJobList(resp http.ResponseWriter, req *http.Request, mesg []byte) {
@@ -409,7 +409,7 @@ func (f *Foreman) HandleClientJobList(resp http.ResponseWriter, req *http.Reques
 		}
 	}
 
-	srv.RespondWithJSON(resp, &jtStatus)
+	RespondWithJSON(resp, &jtStatus)
 }
 
 func isValidJob(job fuq.JobDescription) bool {
@@ -460,7 +460,7 @@ func (f *Foreman) HandleClientJobNew(resp http.ResponseWriter, req *http.Request
 	f.WakeupListeners()
 	log.Printf("queued job %v from host %s", jobDesc, req.Host)
 
-	srv.RespondWithJSON(resp, &fuq.NewJobResponse{JobId: jobId})
+	RespondWithJSON(resp, &fuq.NewJobResponse{JobId: jobId})
 }
 
 func (f *Foreman) HandleClientJobClear(resp http.ResponseWriter, req *http.Request, mesg []byte) {
@@ -470,7 +470,7 @@ func (f *Foreman) HandleClientJobClear(resp http.ResponseWriter, req *http.Reque
 		return
 	}
 
-	srv.RespondWithJSON(resp, struct{ ok bool }{true})
+	RespondWithJSON(resp, struct{ ok bool }{true})
 }
 
 func (f *Foreman) HandleClientJobState(resp http.ResponseWriter, req *http.Request, mesg []byte) {
@@ -520,20 +520,20 @@ func (f *Foreman) HandleClientJobState(resp http.ResponseWriter, req *http.Reque
 		}
 	}
 
-	srv.RespondWithJSON(resp, &ret)
+	RespondWithJSON(resp, &ret)
 }
 
 func (f *Foreman) HandleClientShutdown(resp http.ResponseWriter, req *http.Request, mesg []byte) {
 	log.Printf("client shutdown requested")
 	defer close(f.Done)
 
-	srv.RespondWithJSON(resp, struct{ ok bool }{true})
+	RespondWithJSON(resp, struct{ ok bool }{true})
 }
 
-func (f *Foreman) AddNodeHandler(mux *http.ServeMux, path string, handler srv.NodeRequestHandler) {
+func (f *Foreman) AddNodeHandler(mux *http.ServeMux, path string, handler NodeRequestHandler) {
 	f.AddHandler(mux, path, http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		msg := json.RawMessage{}
-		envelope := srv.NodeRequestEnvelope{Msg: &msg}
+		envelope := NodeRequestEnvelope{Msg: &msg}
 
 		dec := json.NewDecoder(req.Body)
 		if err := dec.Decode(&envelope); err != nil {
@@ -562,10 +562,10 @@ func (f *Foreman) AddNodeHandler(mux *http.ServeMux, path string, handler srv.No
 	}))
 }
 
-func (f *Foreman) AddClientHandler(mux *http.ServeMux, path string, handler srv.ClientRequestHandler) {
+func (f *Foreman) AddClientHandler(mux *http.ServeMux, path string, handler ClientRequestHandler) {
 	f.AddHandler(mux, path, http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		msg := json.RawMessage{}
-		envelope := srv.ClientRequestEnvelope{Msg: &msg}
+		envelope := ClientRequestEnvelope{Msg: &msg}
 
 		dec := json.NewDecoder(req.Body)
 		if err := dec.Decode(&envelope); err != nil {
