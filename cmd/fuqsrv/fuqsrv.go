@@ -71,10 +71,8 @@ func startWorkers(wcfg *srv.WorkerConfig, nproc int, config fuq.Config, wg *sync
 			}
 
 			w := srv.Worker{
-				Seq: seq,
-				// Endpoint: ep,
+				Seq:           seq,
 				Queuer:        q,
-				Name:          wcfg.NodeInfo.Node,
 				Config:        wcfg,
 				DefaultLogDir: logDir,
 				Logger:        logger,
