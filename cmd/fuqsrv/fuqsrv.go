@@ -17,7 +17,9 @@ import (
 	"os"
 	"os/signal"
 	"os/user"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
@@ -47,11 +49,35 @@ func startWorkers(wcfg *srv.WorkerConfig, nproc int, config fuq.Config, wg *sync
 		go func(seq int) {
 			defer wg.Done()
 
-			w := srv.Worker{
-				Seq:      seq,
+			origUniqName := wcfg.NodeInfo.UniqName
+			uniqName := strings.Replace(origUniqName, ":", "_", -1)
+			logDir := ep.Config.LogDir
+
+			log.Printf("HELLO finished.  Unique name is '%s'",
+				origUniqName)
+
+			logPath := filepath.Join(logDir,
+				fmt.Sprintf("%s-%d.log", uniqName, seq))
+
+			logFile, err := os.Create(logPath)
+			fuq.FatalIfError(err, "error creating worker log '%s'", logPath)
+			defer logFile.Close()
+
+			logger := log.New(logFile, "w:"+uniqName, log.LstdFlags)
+			q := &srv.Endpoint{
 				Endpoint: ep,
-				Name:     wcfg.NodeInfo.Node,
 				Config:   wcfg,
+				Logger:   logger,
+			}
+
+			w := srv.Worker{
+				Seq: seq,
+				// Endpoint: ep,
+				Queuer:        q,
+				Name:          wcfg.NodeInfo.Node,
+				Config:        wcfg,
+				DefaultLogDir: logDir,
+				Logger:        logger,
 			}
 			defer w.Close()
 

@@ -7,9 +7,6 @@ import (
 	"math/rand"
 	"net"
 	"net/url"
-	"os"
-	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 )
@@ -28,7 +25,7 @@ const (
 
 type WorkerConfig struct {
 	mu       sync.RWMutex
-	Cookie   fuq.Cookie
+	cookie   fuq.Cookie
 	NodeInfo fuq.NodeInfo
 	allStop  bool
 }
@@ -54,11 +51,11 @@ func (wc *WorkerConfig) AllStop() {
 	wc.allStop = true
 }
 
-func (wc *WorkerConfig) GetCookie() fuq.Cookie {
+func (wc *WorkerConfig) Cookie() fuq.Cookie {
 	wc.mu.RLock()
 	defer wc.mu.RUnlock()
 
-	return wc.Cookie
+	return wc.cookie
 }
 
 func (wc *WorkerConfig) NewCookie(ep *fuq.Endpoint) error {
@@ -72,7 +69,7 @@ func (wc *WorkerConfig) NewCookie(ep *fuq.Endpoint) error {
 
 	ret := HelloResponseEnv{
 		Name:   &wc.NodeInfo.UniqName,
-		Cookie: &wc.Cookie,
+		Cookie: &wc.cookie,
 	}
 
 	log.Print("Calling HELLO endpoint")
@@ -81,7 +78,7 @@ func (wc *WorkerConfig) NewCookie(ep *fuq.Endpoint) error {
 		return err
 	}
 
-	log.Printf("name is %s.  cookie is %s\n", wc.NodeInfo.UniqName, wc.Cookie)
+	log.Printf("name is %s.  cookie is %s\n", wc.NodeInfo.UniqName, wc.cookie)
 
 	return nil
 }
@@ -129,7 +126,7 @@ func (wc *WorkerConfig) RefreshCookie(ep *fuq.Endpoint, oldCookie fuq.Cookie) er
 	wc.mu.Lock()
 	defer wc.mu.Unlock()
 
-	if wc.Cookie != oldCookie {
+	if wc.cookie != oldCookie {
 		return nil
 	}
 
@@ -139,14 +136,14 @@ func (wc *WorkerConfig) RefreshCookie(ep *fuq.Endpoint, oldCookie fuq.Cookie) er
 	}
 
 	req := NodeRequestEnvelope{
-		Cookie: wc.Cookie,
+		Cookie: wc.cookie,
 		Msg:    &hello,
 	}
 
 	name := ""
 	ret := HelloResponseEnv{
 		Name:   &name,
-		Cookie: &wc.Cookie,
+		Cookie: &wc.cookie,
 	}
 
 	if err := ep.CallEndpoint("node/reauth", &req, &ret); err != nil {
@@ -161,62 +158,30 @@ func (wc *WorkerConfig) RefreshCookie(ep *fuq.Endpoint, oldCookie fuq.Cookie) er
 	return nil
 }
 
-type Worker struct {
-	Seq    int
-	Logger *log.Logger
+type Queuer interface {
+	RequestAction(nproc int) (interface{}, error)
+	UpdateAndRequestAction(status fuq.JobStatusUpdate, nproc int) (interface{}, error)
+}
+
+type Endpoint struct {
 	*fuq.Endpoint
-	Name   string
 	Config *WorkerConfig
+	Logger *log.Logger
 }
 
-func NewWorker(name string, config fuq.Config) (*Worker, error) {
-	endpoint, err := fuq.NewEndpoint(config)
-	if err != nil {
-		return nil, err
-	}
-
-	w := &Worker{
-		Endpoint: endpoint,
-		Name:     name,
-	}
-
-	return w, nil
+func (ep *Endpoint) Cookie() fuq.Cookie {
+	return ep.Config.Cookie()
 }
 
-func (w *Worker) Cookie() fuq.Cookie {
-	return w.Config.GetCookie()
-}
-
-func (w *Worker) UniqName() string {
-	return w.Config.NodeInfo.UniqName
-}
-
-func (w *Worker) RefreshCookie(oldCookie fuq.Cookie) error {
-	return w.Config.RefreshCookie(w.Endpoint, oldCookie)
-}
-
-func (w *Worker) LogIfError(err error, pfxFmt string, args ...interface{}) {
-	if err == nil {
-		return
-	}
-
-	pfx := fmt.Sprintf(pfxFmt, args...)
-	w.Log("%s: %v", pfx, err)
-}
-
-func (w *Worker) Log(format string, args ...interface{}) {
-	if w.Logger != nil {
-		w.Logger.Printf(format, args...)
-	} else {
-		log.Printf(format, args...)
-	}
+func (ep *Endpoint) RefreshCookie(oldCookie fuq.Cookie) error {
+	return ep.Config.RefreshCookie(ep.Endpoint, oldCookie)
 }
 
 /* This shouldn't return interface{}, but I'm not entirely sure what it
 * should return
 * XXX
  */
-func (w *Worker) RequestAction(nproc int) (interface{}, error) {
+func (w *Endpoint) RequestAction(nproc int) (interface{}, error) {
 	cookie := w.Cookie()
 
 	req := NodeRequestEnvelope{
@@ -268,7 +233,7 @@ retry:
 	return act, nil
 }
 
-func (w *Worker) UpdateAndRequestAction(status fuq.JobStatusUpdate, nproc int) (interface{}, error) {
+func (w *Endpoint) UpdateAndRequestAction(status fuq.JobStatusUpdate, nproc int) (interface{}, error) {
 	if nproc > 0 {
 		status.NewJob = &fuq.JobRequest{NumProc: nproc}
 	}
@@ -298,28 +263,48 @@ func (w *Worker) UpdateAndRequestAction(status fuq.JobStatusUpdate, nproc int) (
 	return act, nil
 }
 
+// XXX
+func (w *Endpoint) Log(format string, args ...interface{}) {
+	if w.Logger != nil {
+		w.Logger.Printf(format, args...)
+	} else {
+		log.Printf(format, args...)
+	}
+}
+
+type Worker struct {
+	Seq           int
+	Logger        *log.Logger
+	Name          string
+	Config        *WorkerConfig
+	Queuer        Queuer
+	DefaultLogDir string
+}
+
+func (w *Worker) LogIfError(err error, pfxFmt string, args ...interface{}) {
+	if err == nil {
+		return
+	}
+
+	pfx := fmt.Sprintf(pfxFmt, args...)
+	w.Log("%s: %v", pfx, err)
+}
+
+func (w *Worker) Log(format string, args ...interface{}) {
+	if w.Logger != nil {
+		w.Logger.Printf(format, args...)
+	} else {
+		log.Printf(format, args...)
+	}
+}
+
 func (w *Worker) Loop() {
-	// sanitize colons by replacing them with underscores
-	uniqName := strings.Replace(w.UniqName(), ":", "_", -1)
-
-	log.Printf("HELLO finished.  Unique name is '%s'",
-		w.UniqName())
-
-	logPath := filepath.Join(w.Endpoint.Config.LogDir,
-		fmt.Sprintf("%s-%d.log", uniqName, w.Seq))
-
-	logFile, err := os.Create(logPath)
-	fuq.FatalIfError(err, "error creating worker log '%s'", logPath)
-
-	w.Logger = log.New(logFile, "w:"+uniqName, log.LstdFlags)
-	defer w.Logger.SetOutput(os.Stderr)
-	defer logFile.Close()
-
 	numWaits := 0
+
 run_loop:
 	for !w.Config.IsAllStop() {
 		// request a job from the foreman
-		req, err := w.RequestAction(1)
+		req, err := w.Queuer.RequestAction(1)
 		if err != nil {
 			w.Log("error requesting job: %v", err)
 			req = WaitAction{}
@@ -348,7 +333,7 @@ run_loop:
 		case RunAction:
 			numWaits = 0 // reset wait counter
 			if r.LoggingDir == "" {
-				r.LoggingDir = w.Endpoint.Config.LogDir
+				r.LoggingDir = w.DefaultLogDir
 			}
 
 			status, err := r.Run(w.Logger)
@@ -361,7 +346,7 @@ run_loop:
 					status.JobId, status.Task, status.Status)
 			}
 
-			req, err = w.UpdateAndRequestAction(status, 1)
+			req, err = w.Queuer.UpdateAndRequestAction(status, 1)
 			if err != nil {
 				w.Log("error requesting job: %v", err)
 				req = WaitAction{}
