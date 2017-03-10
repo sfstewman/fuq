@@ -1,27 +1,30 @@
 package srv
 
 import (
+	"errors"
 	"fmt"
 	"log"
-	"math/rand"
-	"time"
 )
 
 const (
-	DefaultInterval  = 5 * time.Second
-	IntervalIncrease = 500 * time.Millisecond
-	MaxInterval      = 60 * time.Second
-
 	MaxLogRetry = 10000
 )
 
+var ErrStopCond = errors.New("stop condition")
+
+type Stopper interface {
+	IsStopped() bool
+	Stop()
+}
+
 type Worker struct {
-	Seq    int
-	Logger *log.Logger
-	// Name          string
-	Config        *WorkerConfig
+	Seq           int
+	Logger        *log.Logger
+	Stopper       Stopper
+	Stop          bool
 	Queuer        Queuer
 	DefaultLogDir string
+	NumWaits      int
 }
 
 func (w *Worker) LogIfError(err error, pfxFmt string, args ...interface{}) {
@@ -45,7 +48,7 @@ func (w *Worker) Loop() {
 	numWaits := 0
 
 run_loop:
-	for !w.Config.IsAllStop() {
+	for !w.Stopper.IsStopped() {
 		// request a job from the foreman
 		req, err := w.Queuer.RequestAction(1)
 		if err != nil {
@@ -55,31 +58,26 @@ run_loop:
 
 	req_switch:
 		switch r := req.(type) {
+		case NopAction:
+			// nop, mostly useful for testing
+
 		case WaitAction:
 			// add -1.5 to 1.5 second variability so not all
 			// clients contact at once...
-			randDelay := time.Duration(rand.Intn(300)-150) * 10 * time.Millisecond
-			r.Interval = DefaultInterval + time.Duration(numWaits)*IntervalIncrease + randDelay
-			if r.Interval > MaxInterval {
-				r.Interval = MaxInterval
-			}
 			r.Wait()
 			numWaits++
 			continue run_loop
 
 		case StopAction:
 			if r.All {
-				w.Config.AllStop()
+				w.Stopper.Stop()
 			}
 			break run_loop
 
-		case RunAction:
+		case Runner:
 			numWaits = 0 // reset wait counter
-			if r.LoggingDir == "" {
-				r.LoggingDir = w.DefaultLogDir
-			}
 
-			status, err := r.Run(w.Logger)
+			status, err := r.Run(w)
 			w.LogIfError(err, "error encountered while running job")
 
 			if status.Success {
@@ -95,6 +93,7 @@ run_loop:
 				req = WaitAction{}
 			}
 			goto req_switch
+
 		default:
 			w.Log("unexpected result when requesting job: %v", req)
 		}

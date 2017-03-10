@@ -30,13 +30,13 @@ func NewWorkerConfig(nproc int, tags []string) (*WorkerConfig, error) {
 	return &WorkerConfig{NodeInfo: ni}, nil
 }
 
-func (wc *WorkerConfig) IsAllStop() bool {
+func (wc *WorkerConfig) IsStopped() bool {
 	wc.mu.RLock()
 	defer wc.mu.RUnlock()
 	return wc.allStop
 }
 
-func (wc *WorkerConfig) AllStop() {
+func (wc *WorkerConfig) Stop() {
 	wc.mu.Lock()
 	defer wc.mu.Unlock()
 	wc.allStop = true
