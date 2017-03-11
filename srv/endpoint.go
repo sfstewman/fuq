@@ -10,8 +10,8 @@ const (
 )
 
 type Queuer interface {
-	RequestAction(nproc int) (interface{}, error)
-	UpdateAndRequestAction(status fuq.JobStatusUpdate, nproc int) (interface{}, error)
+	RequestAction(nproc int) (WorkerAction, error)
+	UpdateAndRequestAction(status fuq.JobStatusUpdate, nproc int) (WorkerAction, error)
 }
 
 type Endpoint struct {
@@ -32,7 +32,7 @@ func (ep *Endpoint) RefreshCookie(oldCookie fuq.Cookie) error {
 * should return
 * XXX
  */
-func (w *Endpoint) RequestAction(nproc int) (interface{}, error) {
+func (w *Endpoint) RequestAction(nproc int) (WorkerAction, error) {
 	cookie := w.Cookie()
 
 	req := NodeRequestEnvelope{
@@ -84,7 +84,7 @@ retry:
 	return act, nil
 }
 
-func (w *Endpoint) UpdateAndRequestAction(status fuq.JobStatusUpdate, nproc int) (interface{}, error) {
+func (w *Endpoint) UpdateAndRequestAction(status fuq.JobStatusUpdate, nproc int) (WorkerAction, error) {
 	if nproc > 0 {
 		status.NewJob = &fuq.JobRequest{NumProc: nproc}
 	}

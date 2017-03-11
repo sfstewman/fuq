@@ -19,8 +19,10 @@ const (
 	MaxWait    = 60 * time.Second
 )
 
-// XXX - needs a new name
-type Actioner interface {
+// Action is something that the worker does.
+//
+// Not an -er name, but couldn't find a better name for this.
+type WorkerAction interface {
 	Act(*Worker) (*fuq.JobStatusUpdate, error)
 }
 

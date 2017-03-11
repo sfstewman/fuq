@@ -7,21 +7,19 @@ import (
 )
 
 type ChanQueuer struct {
-	Q chan interface{}
+	Q chan WorkerAction
 	S chan struct{}
 }
 
-func (cq ChanQueuer) RequestAction(nproc int) (interface{}, error) {
-	var act interface{}
-	var ok bool
-
+func (cq ChanQueuer) RequestAction(nproc int) (WorkerAction, error) {
 	select {
-	case act, ok = <-cq.Q:
+	case act, ok := <-cq.Q:
 		if !ok {
+			// !ok means cq.Q is closed: send a stop action
 			goto stop
 		}
-		return act, nil
 
+		return act, nil
 	case <-cq.S:
 		goto stop
 	}
@@ -30,7 +28,7 @@ stop:
 	return StopAction{false}, nil
 }
 
-func (cq ChanQueuer) UpdateAndRequestAction(status fuq.JobStatusUpdate, nproc int) (interface{}, error) {
+func (cq ChanQueuer) UpdateAndRequestAction(status fuq.JobStatusUpdate, nproc int) (WorkerAction, error) {
 	return cq.RequestAction(nproc)
 }
 
@@ -57,7 +55,7 @@ type testingWorker struct {
 	Worker
 	stopper  SimpleStopper
 	stopCh   chan struct{}
-	actionCh chan interface{}
+	actionCh chan WorkerAction
 	doneCh   chan struct{}
 }
 
@@ -65,7 +63,7 @@ func makeTestingWorker() *testingWorker {
 	var w testingWorker
 
 	w.stopCh = make(chan struct{})
-	w.actionCh = make(chan interface{})
+	w.actionCh = make(chan WorkerAction)
 	w.doneCh = make(chan struct{})
 
 	w.stopper = SimpleStopper{w.stopCh}

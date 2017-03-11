@@ -66,56 +66,35 @@ func (w *Worker) RunJob(t fuq.Task) (fuq.JobStatusUpdate, error) {
 }
 
 func (w *Worker) Loop() {
-run_loop:
+	var (
+		req WorkerAction
+		err error
+	)
+
 	for !w.Stopper.IsStopped() {
-		// request a job from the foreman
-		req, err := w.Queuer.RequestAction(1)
+		if req == nil {
+			// request a job from the foreman
+			req, err = w.Queuer.RequestAction(1)
+		}
+
 		if err != nil {
 			w.Log("error requesting job: %v", err)
 			req = WaitAction{}
 		}
 
-	req_switch:
-		switch r := req.(type) {
-		case NopAction:
-			// nop, mostly useful for testing
-
-		case WaitAction:
-			// add -1.5 to 1.5 second variability so not all
-			// clients contact at once...
-			r.Wait()
-			w.NumWaits++
-			continue run_loop
-
-		case StopAction:
-			if r.All {
-				w.Stopper.Stop()
-			}
-			break run_loop
-
-		case RunAction:
-			w.NumWaits = 0 // reset wait counter
-
-			status, err := r.Run(w)
-			w.LogIfError(err, "error encountered while running job")
-
-			if status.Success {
-				w.Log("job %d:%d completed successfully", status.JobId, status.Task)
-			} else {
-				w.Log("job %d:%d encountered error: %s",
-					status.JobId, status.Task, status.Status)
-			}
-
-			req, err = w.Queuer.UpdateAndRequestAction(status, 1)
-			if err != nil {
-				w.Log("error requesting job: %v", err)
-				req = WaitAction{}
-			}
-			goto req_switch
-
-		default:
-			w.Log("unexpected result when requesting job: %v", req)
+		upd, err := req.Act(w)
+		if err == ErrStopCond {
+			return
 		}
+
+		w.LogIfError(err, "error encountered while running job")
+
+		if upd == nil {
+			req = nil
+			continue
+		}
+
+		req, err = w.Queuer.UpdateAndRequestAction(*upd, 1)
 	}
 }
 
