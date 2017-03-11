@@ -129,11 +129,13 @@ func TestLoopWait(t *testing.T) {
 
 type testRunner struct {
 	R int
+	T fuq.Task
 	S fuq.JobStatusUpdate
 	E error
 }
 
-func (r *testRunner) Run(w *Worker) (fuq.JobStatusUpdate, error) {
+func (r *testRunner) Run(t fuq.Task, w *Worker) (fuq.JobStatusUpdate, error) {
+	r.T = t
 	r.R++
 	return r.S, r.E
 }
@@ -141,19 +143,43 @@ func (r *testRunner) Run(w *Worker) (fuq.JobStatusUpdate, error) {
 func TestLoopRun(t *testing.T) {
 	w := makeTestingWorker()
 
+	task := fuq.Task{
+		Task: 85,
+		JobDescription: fuq.JobDescription{
+			JobId:      fuq.JobId(5),
+			Name:       "fooTask",
+			NumTasks:   103,
+			WorkingDir: "/tmp", // XXX - better
+			LoggingDir: "/tmp",
+			Command:    "testCmd",
+		},
+	}
+
+	r := &testRunner{
+		S: fuq.JobStatusUpdate{
+			JobId:   task.JobDescription.JobId,
+			Task:    task.Task,
+			Success: true,
+		},
+	}
+	w.Worker.Runner = r
+
 	go func() {
 		w.Loop()
 		close(w.doneCh)
 	}()
 
-	r := &testRunner{S: fuq.JobStatusUpdate{Success: true}}
-	w.actionCh <- r
+	w.actionCh <- RunAction(task)
 
 	// blocks until run is complete
 	w.actionCh <- NopAction{}
 
 	if r.R != 1 {
 		t.Fatalf("runner was not run (R=%d, expected 1)", r.R)
+	}
+
+	if r.T != task {
+		t.Errorf("task does not agree")
 	}
 
 	w.actionCh <- StopAction{All: false}

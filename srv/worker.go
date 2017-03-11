@@ -3,6 +3,7 @@ package srv
 import (
 	"errors"
 	"fmt"
+	"github.com/sfstewman/fuq"
 	"log"
 )
 
@@ -20,11 +21,22 @@ type Stopper interface {
 type Worker struct {
 	Seq           int
 	Logger        *log.Logger
+	Runner        Runner
 	Stopper       Stopper
 	Stop          bool
 	Queuer        Queuer
 	DefaultLogDir string
 	NumWaits      int
+}
+
+type Runner interface {
+	Run(fuq.Task, *Worker) (fuq.JobStatusUpdate, error)
+}
+
+type RunnerFunc func(fuq.Task, *Worker) (fuq.JobStatusUpdate, error)
+
+func (f RunnerFunc) Run(t fuq.Task, w *Worker) (fuq.JobStatusUpdate, error) {
+	return f(t, w)
 }
 
 func (w *Worker) LogIfError(err error, pfxFmt string, args ...interface{}) {
@@ -44,9 +56,16 @@ func (w *Worker) Log(format string, args ...interface{}) {
 	}
 }
 
-func (w *Worker) Loop() {
-	numWaits := 0
+func (w *Worker) RunJob(t fuq.Task) (fuq.JobStatusUpdate, error) {
+	runner := w.Runner
+	if runner == nil {
+		return defaultRunner(t, w)
+	}
 
+	return runner.Run(t, w)
+}
+
+func (w *Worker) Loop() {
 run_loop:
 	for !w.Stopper.IsStopped() {
 		// request a job from the foreman
@@ -65,7 +84,7 @@ run_loop:
 			// add -1.5 to 1.5 second variability so not all
 			// clients contact at once...
 			r.Wait()
-			numWaits++
+			w.NumWaits++
 			continue run_loop
 
 		case StopAction:
@@ -74,8 +93,8 @@ run_loop:
 			}
 			break run_loop
 
-		case Runner:
-			numWaits = 0 // reset wait counter
+		case RunAction:
+			w.NumWaits = 0 // reset wait counter
 
 			status, err := r.Run(w)
 			w.LogIfError(err, "error encountered while running job")

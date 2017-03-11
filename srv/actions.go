@@ -21,25 +21,25 @@ const (
 
 // XXX - needs a new name
 type Actioner interface {
-	Act(*Worker) error
+	Act(*Worker) (*fuq.JobStatusUpdate, error)
 }
 
 // NopAction is an action that does nothing (a nop).  Useful for
 // testing.
 type NopAction struct{}
 
-func (NopAction) Act(*Worker) error {
-	return nil
+func (NopAction) Act(*Worker) (*fuq.JobStatusUpdate, error) {
+	return nil, nil
 }
 
 type WaitAction struct {
 	Interval time.Duration
 }
 
-func (w WaitAction) Act(worker *Worker) error {
+func (w WaitAction) Act(worker *Worker) (*fuq.JobStatusUpdate, error) {
 	w.Wait()
 	worker.NumWaits++
-	return nil
+	return nil, nil
 }
 
 func (w WaitAction) Wait() time.Duration {
@@ -73,41 +73,46 @@ type StopAction struct {
 	All bool
 }
 
-func (s StopAction) Act(w *Worker) error {
+func (s StopAction) Act(w *Worker) (*fuq.JobStatusUpdate, error) {
 	if s.All && w.Stopper != nil {
 		w.Stopper.Stop()
 	}
-	return ErrStopCond
-}
-
-type Runner interface {
-	Run(w *Worker) (fuq.JobStatusUpdate, error)
+	return nil, ErrStopCond
 }
 
 type RunAction fuq.Task
 
 func (r RunAction) Run(w *Worker) (fuq.JobStatusUpdate, error) {
+	return w.RunJob(fuq.Task(r))
+}
+
+func (r RunAction) Act(w *Worker) (*fuq.JobStatusUpdate, error) {
+	upd, err := r.Run(w)
+	return &upd, err
+}
+
+func defaultRunner(t fuq.Task, w *Worker) (fuq.JobStatusUpdate, error) {
 	status := fuq.JobStatusUpdate{
-		JobId: r.JobId,
-		Task:  r.Task,
+		JobId: t.JobId,
+		Task:  t.Task,
 	}
 
-	if r.LoggingDir == "" {
-		r.LoggingDir = w.DefaultLogDir
+	if t.LoggingDir == "" {
+		t.LoggingDir = w.DefaultLogDir
 	}
 
-	runner := exec.Command(r.Command, strconv.Itoa(r.Task))
-	runner.Dir = r.WorkingDir
+	runner := exec.Command(t.Command, strconv.Itoa(t.Task))
+	runner.Dir = t.WorkingDir
 
 	/* XXX add logging directory option */
 	runner.Stdin = nil
 
 	// XXX make path handling less Unix-y
-	logName := fmt.Sprintf("%s/%s_%d.log", r.LoggingDir, r.Name, r.Task)
+	logName := fmt.Sprintf("%s/%s_%d.log", t.LoggingDir, t.Name, t.Task)
 	logFile, err := os.OpenFile(logName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0666)
 	if err != nil && os.IsExist(err) {
 		for i := 1; i <= MaxLogRetry && os.IsExist(err); i++ {
-			logName = fmt.Sprintf("%s/%s_%d-%d.log", r.LoggingDir, r.Name, r.Task, i)
+			logName = fmt.Sprintf("%s/%s_%d-%d.log", t.LoggingDir, t.Name, t.Task, i)
 			logFile, err = os.OpenFile(logName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0666)
 		}
 	}
