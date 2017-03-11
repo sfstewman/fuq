@@ -15,17 +15,17 @@ type HelloData struct {
 	Running  []fuq.Task
 }
 
-type message struct {
+type Message struct {
 	Type MType
 	Seq  uint32
 	Data interface{}
 }
 
-func (m message) GoString() string {
+func (m Message) GoString() string {
 	return fmt.Sprintf("%s[%v]", m.Type, m.Data)
 }
 
-func (m message) IsStopImmed() bool {
+func (m Message) IsStopImmed() bool {
 	if m.Type != MTypeStop {
 		return false
 	}
@@ -33,7 +33,7 @@ func (m message) IsStopImmed() bool {
 	return m.Data.(uint32) == StopImmed
 }
 
-func (m message) AsStop() (nproc uint32, err error) {
+func (m Message) AsStop() (nproc uint32, err error) {
 	if m.Type != MTypeStop {
 		err = fmt.Errorf("error decoding message, type is %s, not %s",
 			m.Type, MTypeStop)
@@ -51,7 +51,7 @@ func (m message) AsStop() (nproc uint32, err error) {
 	return
 }
 
-func (m message) AsOkay() (nproc, nrun uint16, err error) {
+func (m Message) AsOkay() (nproc, nrun uint16, err error) {
 	if m.Type != MTypeOK {
 		err = fmt.Errorf("error decoding message, type is %s, not %s",
 			m.Type, MTypeOK)
@@ -79,8 +79,8 @@ func arg0Okay(arg0 uint32) (nproc, nrun uint16) {
 	return
 }
 
-func okayMessage(nproc, nrun uint16, seq uint32) message {
-	return message{
+func OkayMessage(nproc, nrun uint16, seq uint32) Message {
+	return Message{
 		Type: MTypeOK,
 		Seq:  seq,
 		Data: okayArg0(nproc, nrun),
@@ -143,7 +143,7 @@ func receiveHeader(r io.Reader) (header, error) {
 	return hdr, err
 }
 
-func (m message) Send(w io.Writer) error {
+func (m Message) Send(w io.Writer) error {
 	switch mt := m.Type; mt {
 	case MTypeOK, MTypeStop, MTypeReset:
 		arg0 := m.Data.(uint32)
@@ -161,9 +161,9 @@ func (m message) Send(w io.Writer) error {
 	}
 }
 
-func ReceiveMessage(r io.Reader) (message, error) {
+func ReceiveMessage(r io.Reader) (Message, error) {
 	var raw []byte
-	var m message
+	var m Message
 
 	h, err := receiveHeader(r)
 	if err != nil {
@@ -205,7 +205,7 @@ func ReceiveMessage(r io.Reader) (message, error) {
 	return m, nil
 }
 
-func (m message) encodeShort(w io.Writer, arg0 uint32) error {
+func (m Message) encodeShort(w io.Writer, arg0 uint32) error {
 	h := header{
 		mtype: m.Type,
 		seq:   m.Seq,
@@ -216,7 +216,7 @@ func (m message) encodeShort(w io.Writer, arg0 uint32) error {
 	return h.Encode(w)
 }
 
-func (m message) encodeError(w io.Writer, errData mtErrorData) error {
+func (m Message) encodeError(w io.Writer, errData mtErrorData) error {
 	h := header{
 		mtype:   m.Type,
 		errcode: errData.Errcode,
@@ -226,7 +226,7 @@ func (m message) encodeError(w io.Writer, errData mtErrorData) error {
 	return h.Encode(w)
 }
 
-func (m message) encodeData(w io.Writer) error {
+func (m Message) encodeData(w io.Writer) error {
 	var encoded []byte
 
 	if m.Data != nil {
@@ -240,7 +240,7 @@ func (m message) encodeData(w io.Writer) error {
 	return m.rawSend(w, encoded)
 }
 
-func (m message) rawSend(w io.Writer, data []byte) error {
+func (m Message) rawSend(w io.Writer, data []byte) error {
 	if len(data) > maxDataSize {
 		return fmt.Errorf("length of message is %d, exceeds 32-bits", len(data))
 	}

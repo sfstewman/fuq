@@ -11,22 +11,22 @@ import (
 )
 
 type MessageHandler interface {
-	Handle(msg message) (response message)
+	Handle(msg Message) (response Message)
 }
 
-type MessageHandlerFunc func(message) message
+type MessageHandlerFunc func(Message) Message
 
-func (h MessageHandlerFunc) Handle(msg message) message {
+func (h MessageHandlerFunc) Handle(msg Message) Message {
 	return h(msg)
 }
 
 type reply struct {
-	M message
+	M Message
 	E error
 }
 
 type outgoingMessage struct {
-	M message
+	M Message
 	R chan<- reply
 }
 
@@ -86,7 +86,7 @@ func (mc *MultiConvo) updateSeq(new uint32) {
 	mc.seq.Update(new + 1)
 }
 
-func (mc *MultiConvo) xmit(m message) error {
+func (mc *MultiConvo) xmit(m Message) error {
 	dt := mc.Timeout
 	conn := mc.conn
 
@@ -102,7 +102,7 @@ func (mc *MultiConvo) xmit(m message) error {
 	return nil
 }
 
-func (mc *MultiConvo) xmitWithSeq(m message) (seq uint32, err error) {
+func (mc *MultiConvo) xmitWithSeq(m Message) (seq uint32, err error) {
 	seq = mc.nextSeq()
 	m.Seq = seq
 	err = mc.xmit(m)
@@ -120,7 +120,7 @@ func (mc *MultiConvo) OnMessageFunc(mt MType, f MessageHandlerFunc) {
 	mc.OnMessage(mt, f)
 }
 
-func (mc *MultiConvo) incomingLoop(msgCh chan<- message, errorCh chan<- reply, done <-chan struct{}) {
+func (mc *MultiConvo) incomingLoop(msgCh chan<- Message, errorCh chan<- reply, done <-chan struct{}) {
 	dt := mc.Timeout
 	conn := mc.conn
 
@@ -185,7 +185,7 @@ func (mc *MultiConvo) incomingLoop(msgCh chan<- message, errorCh chan<- reply, d
 	}
 }
 
-func (mc *MultiConvo) dispatchMessage(m message) error {
+func (mc *MultiConvo) dispatchMessage(m Message) error {
 	t := m.Type
 	h := mc.handlers[uint8(t)]
 	if h == nil {
@@ -225,10 +225,10 @@ func (mc *MultiConvo) ConversationLoop() error {
 		waitingSeq uint32
 		replyCh    chan<- reply
 
-		pending *message
+		pending *Message
 
 		errorCh    chan reply    = make(chan reply, 1)
-		incomingCh chan message  = make(chan message)
+		incomingCh chan Message  = make(chan Message)
 		closingCh  chan struct{} = make(chan struct{})
 	)
 
@@ -319,8 +319,8 @@ recv_loop:
 	return nil
 }
 
-func (mc *MultiConvo) sendMessage(mt MType, data interface{}) (message, error) {
-	m := message{Type: mt, Data: data}
+func (mc *MultiConvo) sendMessage(mt MType, data interface{}) (Message, error) {
+	m := Message{Type: mt, Data: data}
 	replyCh := make(chan reply)
 	mc.outgoingCh <- outgoingMessage{M: m, R: replyCh}
 
@@ -329,19 +329,19 @@ func (mc *MultiConvo) sendMessage(mt MType, data interface{}) (message, error) {
 		// log.Printf("reply: %v", repl)
 		return repl.M, repl.E
 	case <-mc.ctx.Done():
-		return message{}, mc.ctx.Err()
+		return Message{}, mc.ctx.Err()
 	}
 }
 
-func (mc *MultiConvo) SendJob(job []fuq.Task) (message, error) {
+func (mc *MultiConvo) SendJob(job []fuq.Task) (Message, error) {
 	return mc.sendMessage(MTypeJob, &job)
 }
 
-func (mc *MultiConvo) SendUpdate(update fuq.JobStatusUpdate) (message, error) {
+func (mc *MultiConvo) SendUpdate(update fuq.JobStatusUpdate) (Message, error) {
 	return mc.sendMessage(MTypeUpdate, &update)
 }
 
-func (mc *MultiConvo) SendStop(nproc uint32) (message, error) {
+func (mc *MultiConvo) SendStop(nproc uint32) (Message, error) {
 	return mc.sendMessage(MTypeStop, nproc)
 }
 
@@ -350,6 +350,6 @@ func (mc *MultiConvo) SendStopImmed() error {
 	return err
 }
 
-func (mc *MultiConvo) SendHello(hello HelloData) (message, error) {
+func (mc *MultiConvo) SendHello(hello HelloData) (Message, error) {
 	return mc.sendMessage(MTypeHello, &hello)
 }

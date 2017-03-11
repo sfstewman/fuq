@@ -116,12 +116,12 @@ func TestOnMessage(t *testing.T) {
 	defer tc.Close()
 
 	syncCh, mcw, mcf := tc.syncCh, tc.mcw, tc.mcf
-	received := message{}
+	received := Message{}
 
-	mcw.OnMessageFunc(MTypeJob, func(msg message) message {
+	mcw.OnMessageFunc(MTypeJob, func(msg Message) Message {
 		received = msg
 		close(syncCh)
-		return okayMessage(17, 5, msg.Seq)
+		return OkayMessage(17, 5, msg.Seq)
 	})
 
 	goPanicOnError(mcw.ConversationLoop)
@@ -162,7 +162,7 @@ func TestOnMessage(t *testing.T) {
 	}
 }
 
-func checkOK(t *testing.T, m message, nproc0, nrun0 uint16) {
+func checkOK(t *testing.T, m Message, nproc0, nrun0 uint16) {
 	nproc, nrun, err := m.AsOkay()
 	if err != nil {
 		t.Fatalf("cannot decode response: %v", err)
@@ -181,15 +181,15 @@ func TestSendJob(t *testing.T) {
 	defer tc.Close()
 
 	syncCh, mcw, mcf := tc.syncCh, tc.mcw, tc.mcf
-	received := message{}
+	received := Message{}
 
 	mcf.flusher = fl
 
-	mcw.OnMessageFunc(MTypeJob, func(msg message) message {
+	mcw.OnMessageFunc(MTypeJob, func(msg Message) Message {
 		received = msg
 		tc.syncCh = nil
 		close(syncCh)
-		return okayMessage(17, 5, msg.Seq)
+		return OkayMessage(17, 5, msg.Seq)
 	})
 
 	goPanicOnError(mcw.ConversationLoop)
@@ -242,15 +242,15 @@ func TestSendUpdate(t *testing.T) {
 	defer tc.Close()
 
 	syncCh, mcw, mcf := tc.syncCh, tc.mcw, tc.mcf
-	received := message{}
+	received := Message{}
 
 	mcw.flusher = fl
 
-	mcf.OnMessageFunc(MTypeUpdate, func(msg message) message {
+	mcf.OnMessageFunc(MTypeUpdate, func(msg Message) Message {
 		received = msg
 		tc.syncCh = nil
 		close(syncCh)
-		return okayMessage(12, 3, msg.Seq)
+		return OkayMessage(12, 3, msg.Seq)
 	})
 
 	goPanicOnError(mcw.ConversationLoop)
@@ -297,15 +297,15 @@ func TestSendStop(t *testing.T) {
 	defer tc.Close()
 
 	syncCh, mcw, mcf := tc.syncCh, tc.mcw, tc.mcf
-	received := message{}
+	received := Message{}
 
 	mcf.flusher = fl
 
-	mcw.OnMessageFunc(MTypeStop, func(msg message) message {
+	mcw.OnMessageFunc(MTypeStop, func(msg Message) Message {
 		received = msg
 		tc.syncCh = nil
 		close(syncCh)
-		return okayMessage(4, 3, msg.Seq)
+		return OkayMessage(4, 3, msg.Seq)
 	})
 
 	goPanicOnError(mcw.ConversationLoop)
@@ -347,16 +347,16 @@ func TestSendHello(t *testing.T) {
 	defer tc.Close()
 
 	syncCh, mcw, mcf := tc.syncCh, tc.mcw, tc.mcf
-	received := message{}
+	received := Message{}
 
 	mcf.flusher = flf
 	mcw.flusher = flw
 
-	mcf.OnMessageFunc(MTypeHello, func(msg message) message {
+	mcf.OnMessageFunc(MTypeHello, func(msg Message) Message {
 		received = msg
 		tc.syncCh = nil
 		close(syncCh)
-		return okayMessage(4, 3, msg.Seq)
+		return OkayMessage(4, 3, msg.Seq)
 	})
 
 	goPanicOnError(mcw.ConversationLoop)
@@ -412,14 +412,14 @@ func TestSecondSendBlocksUntilReply(t *testing.T) {
 
 	_, mcw, mcf := tc.syncCh, tc.mcw, tc.mcf
 
-	mcw.OnMessageFunc(MTypeJob, func(msg message) message {
+	mcw.OnMessageFunc(MTypeJob, func(msg Message) Message {
 		// log.Printf("RECEIVED: JOB")
 		data := msg.Data.(*[]fuq.Task)
 		close(recvSync) // signal that first message has been received
 
 		<-replWait
 		order <- (*data)[0].Task
-		return okayMessage(17, 5, msg.Seq)
+		return OkayMessage(17, 5, msg.Seq)
 	})
 
 	goPanicOnError(mcw.ConversationLoop)
@@ -512,7 +512,7 @@ func TestHoldMessageUntilReply(t *testing.T) {
 
 	mcw, mcf := tc.mcw, tc.mcf
 
-	mcw.OnMessageFunc(MTypeJob, func(msg message) message {
+	mcw.OnMessageFunc(MTypeJob, func(msg Message) Message {
 		order <- 3
 		// log.Printf("RECEIVED: JOB")
 
@@ -521,16 +521,16 @@ func TestHoldMessageUntilReply(t *testing.T) {
 
 		// wait for signal to send reply
 		<-recvWait
-		return okayMessage(17, 5, msg.Seq)
+		return OkayMessage(17, 5, msg.Seq)
 	})
 
-	mcf.OnMessageFunc(MTypeUpdate, func(msg message) message {
+	mcf.OnMessageFunc(MTypeUpdate, func(msg Message) Message {
 		// signal that second send has been received
 		close(recvSignal2)
 
 		order <- 4
 		// log.Printf("RECEIVED: UPDATE")
-		return okayMessage(18, 4, msg.Seq)
+		return OkayMessage(18, 4, msg.Seq)
 	})
 
 	goPanicOnError(mcw.ConversationLoop)
@@ -648,17 +648,17 @@ func TestSequencesAreIncreasing(t *testing.T) {
 		return s
 	}
 
-	mcw.OnMessageFunc(MTypeJob, func(msg message) message {
+	mcw.OnMessageFunc(MTypeJob, func(msg Message) Message {
 		addSeq(1, msg.Seq)
 		// log.Printf("RECEIVED: JOB")
-		return okayMessage(17, 5, msg.Seq)
+		return OkayMessage(17, 5, msg.Seq)
 	})
 
-	mcf.OnMessageFunc(MTypeUpdate, func(msg message) message {
+	mcf.OnMessageFunc(MTypeUpdate, func(msg Message) Message {
 		addSeq(2, msg.Seq)
 		// signal that second send has been received
 		// log.Printf("RECEIVED: UPDATE")
-		return okayMessage(18, 4, msg.Seq)
+		return OkayMessage(18, 4, msg.Seq)
 	})
 
 	goPanicOnError(mcw.ConversationLoop)

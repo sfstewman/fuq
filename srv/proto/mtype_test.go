@@ -10,7 +10,7 @@ import (
 func TestOkayMessage(t *testing.T) {
 	buf := &bytes.Buffer{}
 
-	msg := okayMessage(17, 0, 2)
+	msg := OkayMessage(17, 0, 2)
 	if err := msg.Send(buf); err != nil {
 		t.Fatalf("error sending OK(17): %v", err)
 	}
@@ -28,7 +28,7 @@ func TestOkayMessage(t *testing.T) {
 	checkOK(t, incoming, 17, 0)
 
 	/* check receiving with ReceiveMessage() */
-	msg = okayMessage(5, 11, 3)
+	msg = OkayMessage(5, 11, 3)
 	if err := msg.Send(buf); err != nil {
 		t.Fatalf("error sending OK(5|11): %v", err)
 	}
