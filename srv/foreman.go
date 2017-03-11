@@ -1,6 +1,7 @@
 package srv
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/sfstewman/fuq"
@@ -28,14 +29,26 @@ type Foreman struct {
 	Config fuq.Config
 
 	jobsSignal struct {
-		mu   sync.Mutex
-		cond *sync.Cond
+		mu    sync.Mutex
+		ready chan struct{}
 	}
 	Done chan<- struct{}
 }
 
 func (f *Foreman) Close() error {
 	return f.stores.Close()
+}
+
+func (f *Foreman) ready(lock bool) <-chan struct{} {
+	if lock {
+		f.jobsSignal.mu.Lock()
+		defer f.jobsSignal.mu.Unlock()
+	}
+
+	if f.jobsSignal.ready == nil {
+		f.jobsSignal.ready = make(chan struct{})
+	}
+	return f.jobsSignal.ready
 }
 
 func NewForeman(config fuq.Config, done chan<- struct{}) (*Foreman, error) {
@@ -52,7 +65,7 @@ func NewForeman(config fuq.Config, done chan<- struct{}) (*Foreman, error) {
 		Done:        done,
 	}
 
-	f.jobsSignal.cond = sync.NewCond(&f.jobsSignal.mu)
+	// f.jobsSignal.cond = sync.NewCond(&f.jobsSignal.mu)
 	f.shutdownReq.shutdownHost = make(map[string]struct{})
 
 	return &f, nil
@@ -214,11 +227,37 @@ func (f *Foreman) replyWithShutdown(resp http.ResponseWriter, req *http.Request)
 	RespondWithJSON(resp, repl)
 }
 
+func (f *Foreman) fetchNextTasks(ctx context.Context, nproc int, ni fuq.NodeInfo) ([]fuq.Task, error) {
+	for {
+		f.jobsSignal.mu.Lock()
+
+		// request jobs
+		tasks, err := f.FetchPendingTasks(nproc)
+		if err != nil || len(tasks) > 0 {
+			f.jobsSignal.mu.Unlock()
+			return tasks, err
+		}
+
+		jobsAvail := f.ready(false)
+		f.jobsSignal.mu.Unlock()
+
+		if f.IsNodeShutdown(ni.UniqName) {
+			return nil, nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, nil
+		case <-jobsAvail:
+			continue
+		}
+	}
+}
+
 func (f *Foreman) replyToRequest(resp http.ResponseWriter, req *http.Request, ni fuq.NodeInfo, jobReq fuq.JobRequest) {
 	var (
-		jobsAvail chan struct{}
-		tasks     []fuq.Task
-		err       error
+		tasks []fuq.Task
+		err   error
 	)
 
 	nproc := jobReq.NumProc
@@ -228,58 +267,30 @@ func (f *Foreman) replyToRequest(resp http.ResponseWriter, req *http.Request, ni
 
 	ctx := req.Context()
 
-	for {
+	// request jobs
+	tasks, err = f.fetchNextTasks(ctx, jobReq.NumProc, ni)
+	if err != nil {
+		log.Printf("error fetching pending tasks: %v", err)
+		fuq.InternalError(resp, req)
+		return
+	}
+
+	if len(tasks) == 0 {
 		if f.IsNodeShutdown(ni.UniqName) {
 			f.replyWithShutdown(resp, req)
 			return
 		}
 
-		// request jobs
-		tasks, err = f.FetchPendingTasks(jobReq.NumProc)
-		if err != nil {
-			log.Printf("error fetching pending tasks: %v", err)
-			fuq.InternalError(resp, req)
-			return
-		}
-
-		if len(tasks) > 0 {
-			for _, t := range tasks {
-				log.Printf("dispatching task %d:%s:%d to node %s",
-					t.JobId, t.Name, t.Task, ni.UniqName)
-			}
-
-			RespondWithJSON(resp, tasks)
-			return
-		}
-
-		// lazy allocation so we don't allocate if we don't need
-		// it
-		if jobsAvail == nil {
-			jobsAvail = make(chan struct{})
-		}
-
-		go func() {
-			f.jobsSignal.mu.Lock()
-			defer f.jobsSignal.mu.Unlock()
-			log.Printf("request from %s waiting on more jobs", ni.UniqName)
-			f.jobsSignal.cond.Wait()
-			jobsAvail <- struct{}{}
-		}()
-
-		select {
-		case <-ctx.Done():
-			log.Printf("request %p canceled from node %s", req, ni.UniqName)
-			RespondWithJSON(resp, tasks)
-		case <-jobsAvail:
-			log.Printf("trying to queue jobs for node %s", ni.UniqName)
-			continue
-			/*
-				case <-f.Done:
-					// XXX: fast exit -- although we should send a shutdown request
-					return
-			*/
-		}
+		log.Printf("request %p canceled from node %s", req, ni.UniqName)
+		RespondWithJSON(resp, tasks)
 	}
+
+	for _, t := range tasks {
+		log.Printf("dispatching task %d:%s:%d to node %s",
+			t.JobId, t.Name, t.Task, ni.UniqName)
+	}
+
+	RespondWithJSON(resp, tasks)
 }
 
 func (f *Foreman) HandleNodeJobRequest(resp http.ResponseWriter, req *http.Request, mesg []byte, ni fuq.NodeInfo) {
@@ -418,8 +429,13 @@ func isValidJob(job fuq.JobDescription) bool {
 
 func (f *Foreman) WakeupListeners() {
 	f.jobsSignal.mu.Lock()
-	f.jobsSignal.cond.Broadcast()
-	f.jobsSignal.mu.Unlock()
+	defer f.jobsSignal.mu.Unlock()
+	signal := f.jobsSignal.ready
+	f.jobsSignal.ready = make(chan struct{})
+	if signal != nil {
+		close(signal)
+	}
+	// f.jobsSignal.cond.Broadcast()
 }
 
 func (f *Foreman) HandleClientJobNew(resp http.ResponseWriter, req *http.Request, mesg []byte) {
