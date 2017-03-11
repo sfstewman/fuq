@@ -30,6 +30,10 @@ type outgoingMessage struct {
 	R chan<- reply
 }
 
+type NopFlusher struct{}
+
+func (NopFlusher) Flush() {}
+
 type MultiConvo struct {
 	conn     net.Conn
 	flusher  http.Flusher

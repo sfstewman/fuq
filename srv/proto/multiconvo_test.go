@@ -13,10 +13,6 @@ import (
 	// "log"
 )
 
-type nilFlusher struct{}
-
-func (nilFlusher) Flush() {}
-
 type testConvo struct {
 	pworker, pforeman net.Conn
 	mcw, mcf          *MultiConvo
@@ -37,14 +33,14 @@ func newTestConvo() testConvo {
 
 	tc.mcw = NewMultiConvo(MultiConvoOpts{
 		Conn:    tc.pworker,
-		Flusher: nilFlusher{},
+		Flusher: NopFlusher{},
 		Context: ctx,
 		Worker:  true,
 	})
 
 	tc.mcf = NewMultiConvo(MultiConvoOpts{
 		Conn:    tc.pforeman,
-		Flusher: nilFlusher{},
+		Flusher: NopFlusher{},
 		Context: ctx,
 		Worker:  false,
 	})
