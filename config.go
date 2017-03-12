@@ -527,3 +527,7 @@ func (c *Config) ReadConfig(r io.Reader, pv *PathVars) error {
 		return nil
 	})
 }
+
+func (c Config) EndpointURL(endpoint string) string {
+	return fmt.Sprintf("https://%s:%d/%s", c.Foreman, c.Port, endpoint)
+}

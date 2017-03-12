@@ -28,10 +28,6 @@ func (ep *Endpoint) RefreshCookie(oldCookie fuq.Cookie) error {
 	return ep.Config.RefreshCookie(ep.Endpoint, oldCookie)
 }
 
-/* This shouldn't return interface{}, but I'm not entirely sure what it
-* should return
-* XXX
- */
 func (w *Endpoint) RequestAction(nproc int) (WorkerAction, error) {
 	cookie := w.Cookie()
 

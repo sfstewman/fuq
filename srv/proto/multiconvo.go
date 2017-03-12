@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"github.com/sfstewman/fuq"
 	"log"
-	"net"
 	"net/http"
 	"time"
 )
@@ -35,8 +34,9 @@ type NopFlusher struct{}
 func (NopFlusher) Flush() {}
 
 type MultiConvo struct {
-	conn     net.Conn
-	flusher  http.Flusher
+	messenger Messenger
+	// conn     net.Conn
+	// flusher  http.Flusher
 	seq      Sequencer
 	isWorker bool
 
@@ -50,16 +50,15 @@ type MultiConvo struct {
 }
 
 type MultiConvoOpts struct {
-	Conn    net.Conn
-	Flusher http.Flusher
-	Context context.Context
-	Worker  bool
+	Messenger Messenger
+	Flusher   http.Flusher
+	Context   context.Context
+	Worker    bool
 }
 
 func NewMultiConvo(opts MultiConvoOpts) *MultiConvo {
 	return &MultiConvo{
-		conn:       opts.Conn,
-		flusher:    opts.Flusher,
+		messenger:  opts.Messenger,
 		seq:        &LockedSequence{},
 		isWorker:   opts.Worker,
 		ctx:        opts.Context,
@@ -87,19 +86,7 @@ func (mc *MultiConvo) updateSeq(new uint32) {
 }
 
 func (mc *MultiConvo) xmit(m Message) error {
-	dt := mc.Timeout
-	conn := mc.conn
-
-	t := time.Now()
-	conn.SetWriteDeadline(t.Add(dt))
-
-	if err := m.Send(conn); err != nil {
-		// log.Printf("%p --> MD error sending %v: %v", m, err)
-		return err
-	}
-	defer mc.flusher.Flush()
-
-	return nil
+	return mc.messenger.Send(m)
 }
 
 func (mc *MultiConvo) xmitWithSeq(m Message) (seq uint32, err error) {
@@ -121,9 +108,6 @@ func (mc *MultiConvo) OnMessageFunc(mt MType, f MessageHandlerFunc) {
 }
 
 func (mc *MultiConvo) incomingLoop(msgCh chan<- Message, errorCh chan<- reply, done <-chan struct{}) {
-	dt := mc.Timeout
-	conn := mc.conn
-
 	defer close(msgCh)
 	defer func() {
 		if r := recover(); r != nil {
@@ -147,10 +131,7 @@ func (mc *MultiConvo) incomingLoop(msgCh chan<- Message, errorCh chan<- reply, d
 		default:
 		}
 
-		t := time.Now()
-		conn.SetReadDeadline(t.Add(dt))
-
-		msg, err := ReceiveMessage(conn)
+		msg, err := mc.messenger.Receive()
 
 		// even if there's an error, we need to update the sequence number
 		mc.updateSeq(msg.Seq)

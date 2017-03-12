@@ -124,7 +124,7 @@ func makeEndpoint(c Config, configHTTP2 bool) (*Endpoint, error) {
 }
 
 func (e Endpoint) SendMessage(endpoint string, mesg interface{}) (*http.Response, error) {
-	url := fmt.Sprintf("https://%s:%d/%s", e.Config.Foreman, e.Config.Port, endpoint)
+	url := e.Config.EndpointURL(endpoint)
 	// log.Printf("calling endpoint '%s' at %s", endpoint, url)
 	data, err := json.Marshal(mesg)
 	if err != nil {

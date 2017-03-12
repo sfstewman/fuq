@@ -3,23 +3,66 @@ package proto
 import (
 	"context"
 	"fmt"
+	"github.com/gorilla/websocket"
 	"github.com/sfstewman/fuq"
 	"io"
+	"io/ioutil"
 	"net"
+	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"sync"
 	"testing"
+	"time"
 	// "log"
 )
 
+type convoTestRigger interface {
+	MCW() *MultiConvo
+	MCF() *MultiConvo
+
+	SyncCh() chan struct{}
+	NilSyncCh()
+
+	Close()
+}
+
+type testRigMaker func() convoTestRigger
+
+func testWithRig(mk testRigMaker, testFunc func(convoTestRigger, *testing.T)) func(*testing.T) {
+	return func(t *testing.T) {
+		rig := mk()
+		defer rig.Close()
+
+		testFunc(rig, t)
+	}
+}
+
 type testConvo struct {
 	pworker, pforeman net.Conn
-	mcw, mcf          *MultiConvo
+	mcw1, mcf1        *MultiConvo
 
 	cancelFunc context.CancelFunc
 
-	syncCh chan struct{}
+	syncCh1 chan struct{}
+}
+
+func (tc *testConvo) MCW() *MultiConvo {
+	return tc.mcw1
+}
+
+func (tc *testConvo) MCF() *MultiConvo {
+	return tc.mcf1
+}
+
+func (tc *testConvo) SyncCh() chan struct{} {
+	return tc.syncCh1
+}
+
+func (tc *testConvo) NilSyncCh() {
+	tc.syncCh1 = nil
 }
 
 func newTestConvo() testConvo {
@@ -31,23 +74,176 @@ func newTestConvo() testConvo {
 
 	tc.cancelFunc = cancelFunc
 
-	tc.mcw = NewMultiConvo(MultiConvoOpts{
-		Conn:    tc.pworker,
-		Flusher: NopFlusher{},
+	tc.mcw1 = NewMultiConvo(MultiConvoOpts{
+		Messenger: ConnMessenger{
+			Conn:    tc.pworker,
+			Flusher: NopFlusher{},
+		},
 		Context: ctx,
 		Worker:  true,
 	})
 
-	tc.mcf = NewMultiConvo(MultiConvoOpts{
-		Conn:    tc.pforeman,
-		Flusher: NopFlusher{},
+	tc.mcf1 = NewMultiConvo(MultiConvoOpts{
+		Messenger: ConnMessenger{
+			Conn:    tc.pforeman,
+			Flusher: NopFlusher{},
+		},
 		Context: ctx,
 		Worker:  false,
 	})
 
-	tc.syncCh = make(chan struct{})
+	tc.syncCh1 = make(chan struct{})
 
 	return tc
+}
+
+type wsConvo struct {
+	Http     http.Server
+	SConn    *websocket.Conn
+	CConn    *websocket.Conn
+	TmpDir   string
+	Listener net.Listener
+	Server   http.Server
+
+	mcw, mcf   *MultiConvo
+	cancelFunc context.CancelFunc
+	syncCh     chan struct{}
+}
+
+func (wsc *wsConvo) Close() {
+	wsc.cancelFunc()
+	wsc.mcf.Close()
+	wsc.mcw.Close()
+
+	// shut down sync channel
+	closeIfNonNil(wsc.syncCh)
+
+	// wsc.Server.Shutdown()
+
+	wsc.Listener.Close()
+	os.Remove(wsc.TmpDir)
+}
+
+func (wsc *wsConvo) MCW() *MultiConvo {
+	return wsc.mcw
+}
+
+func (wsc *wsConvo) MCF() *MultiConvo {
+	return wsc.mcf
+}
+
+func (wsc *wsConvo) SyncCh() chan struct{} {
+	return wsc.syncCh
+}
+
+func (wsc *wsConvo) NilSyncCh() {
+	wsc.syncCh = nil
+}
+
+func newWebSocketConvo() *wsConvo {
+	wsc := wsConvo{}
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+
+		wsc.Close()
+		panic(r)
+	}()
+
+	tmpDir, err := ioutil.TempDir(os.TempDir(), "wsc_test")
+	if err != nil {
+		panic(err)
+	}
+
+	// log.Printf("tmpdir = %s", tmpDir)
+	wsc.TmpDir = tmpDir
+	if err = os.Chmod(tmpDir, 0700); err != nil {
+		panic(err)
+	}
+
+	// XXX - is there a better/portable way?
+	socketPath := filepath.Join(tmpDir, "socket.web")
+	addr, err := net.ResolveUnixAddr("unix", socketPath)
+	if err != nil {
+		panic(err)
+	}
+
+	listener, err := net.ListenUnix("unix", addr)
+	if err != nil {
+		panic(err)
+	}
+
+	wsc.Listener = listener
+
+	connCh := make(chan *websocket.Conn)
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{
+			ReadBufferSize:  1024,
+			WriteBufferSize: 1024,
+		}
+
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			panic(err)
+		}
+
+		connCh <- conn
+	}
+
+	wsc.Http = http.Server{
+		Handler: http.HandlerFunc(handler),
+	}
+
+	// start the server side...
+	go wsc.Http.Serve(listener)
+
+	// start the client side...
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		panic(err)
+	}
+
+	dialer := websocket.Dialer{
+		NetDial: func(network, addr string) (net.Conn, error) {
+			return conn, nil
+		},
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+	}
+
+	cconn, _, err := dialer.Dial("ws://localhost", nil)
+	if err != nil {
+		panic(err)
+	}
+	wsc.CConn = cconn
+	wsc.SConn = <-connCh
+
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	wsc.cancelFunc = cancelFunc
+
+	wsc.mcw = NewMultiConvo(MultiConvoOpts{
+		Messenger: WebsocketMessenger{
+			C:       wsc.CConn,
+			Timeout: 60 * time.Second,
+		},
+		Context: ctx,
+		Worker:  true,
+	})
+
+	wsc.mcf = NewMultiConvo(MultiConvoOpts{
+		Messenger: WebsocketMessenger{
+			C:       wsc.SConn,
+			Timeout: 60 * time.Second,
+		},
+		Context: ctx,
+		Worker:  false,
+	})
+
+	wsc.syncCh = make(chan struct{})
+
+	return &wsc
 }
 
 type checkFlusher struct {
@@ -88,10 +284,11 @@ func callCloseIfNonNil(cl io.Closer) {
 func (t *testConvo) Close() {
 	// first shut down Done channels
 	t.cancelFunc()
-	t.mcf.Close()
+	t.mcf1.Close()
+	t.mcw1.Close()
 
 	// shut down sync channel
-	closeIfNonNil(t.syncCh)
+	closeIfNonNil(t.syncCh1)
 
 	// then shut down pipes
 	callCloseIfNonNil(t.pworker)
@@ -111,11 +308,34 @@ func goPanicOnError(f func() error) {
 	}()
 }
 
-func TestOnMessage(t *testing.T) {
-	tc := newTestConvo()
-	defer tc.Close()
+func runTestsWithRig(mk testRigMaker, t *testing.T) {
+	t.Run("OnMessage", testWithRig(mk, OnMessageTest))
+	t.Run("SendJob", testWithRig(mk, SendJobTest))
+	t.Run("SendUpdate", testWithRig(mk, SendUpdateTest))
+	t.Run("SendStop", testWithRig(mk, SendStopTest))
+	t.Run("SendHello", testWithRig(mk, SendHelloTest))
+	t.Run("SecondSendBlocksUntilReply", testWithRig(mk, SecondSendBlocksUntilReplyTest))
+	t.Run("HoldMessageUntilReply", testWithRig(mk, HoldMessageUntilReplyTest))
+	t.Run("SequencesAreIncreasing", testWithRig(mk, SequencesAreIncreasingTest))
+}
 
-	syncCh, mcw, mcf := tc.syncCh, tc.mcw, tc.mcf
+func TestNetConn(t *testing.T) {
+	mk := func() convoTestRigger {
+		tc := newTestConvo()
+		return &tc
+	}
+	runTestsWithRig(mk, t)
+}
+
+func TestWebSocket(t *testing.T) {
+	mk := func() convoTestRigger {
+		return newWebSocketConvo()
+	}
+	runTestsWithRig(mk, t)
+}
+
+func OnMessageTest(tc convoTestRigger, t *testing.T) {
+	syncCh, mcw, mcf := tc.SyncCh(), tc.MCW(), tc.MCF()
 	received := Message{}
 
 	mcw.OnMessageFunc(MTypeJob, func(msg Message) Message {
@@ -141,7 +361,7 @@ func TestOnMessage(t *testing.T) {
 
 	// make sure the OnMessage handler was called...
 	<-syncCh
-	tc.syncCh = nil
+	tc.NilSyncCh()
 
 	if received.Type != MTypeJob {
 		t.Errorf("wrong job type, expected JOB, found %d", received.Type)
@@ -174,20 +394,15 @@ func checkOK(t *testing.T, m Message, nproc0, nrun0 uint16) {
 	}
 }
 
-func TestSendJob(t *testing.T) {
-	fl := newCheckFlusher()
-
-	tc := newTestConvo()
-	defer tc.Close()
-
-	syncCh, mcw, mcf := tc.syncCh, tc.mcw, tc.mcf
+func SendJobTest(tc convoTestRigger, t *testing.T) {
+	syncCh, mcw, mcf := tc.SyncCh(), tc.MCW(), tc.MCF()
 	received := Message{}
 
-	mcf.flusher = fl
+	// mcf.flusher = fl
 
 	mcw.OnMessageFunc(MTypeJob, func(msg Message) Message {
 		received = msg
-		tc.syncCh = nil
+		tc.NilSyncCh()
 		close(syncCh)
 		return OkayMessage(17, 5, msg.Seq)
 	})
@@ -215,10 +430,6 @@ func TestSendJob(t *testing.T) {
 		t.Fatalf("error sending JOB: %v", err)
 	}
 
-	if !fl.IsFlushed() {
-		t.Errorf("flush not called after SendJob")
-	}
-
 	if received.Type != MTypeJob {
 		t.Fatalf("expected job message")
 	}
@@ -235,20 +446,13 @@ func TestSendJob(t *testing.T) {
 	checkOK(t, repl, 17, 5)
 }
 
-func TestSendUpdate(t *testing.T) {
-	fl := newCheckFlusher()
-
-	tc := newTestConvo()
-	defer tc.Close()
-
-	syncCh, mcw, mcf := tc.syncCh, tc.mcw, tc.mcf
+func SendUpdateTest(tc convoTestRigger, t *testing.T) {
+	syncCh, mcw, mcf := tc.SyncCh(), tc.MCW(), tc.MCF()
 	received := Message{}
-
-	mcw.flusher = fl
 
 	mcf.OnMessageFunc(MTypeUpdate, func(msg Message) Message {
 		received = msg
-		tc.syncCh = nil
+		tc.NilSyncCh()
 		close(syncCh)
 		return OkayMessage(12, 3, msg.Seq)
 	})
@@ -266,9 +470,6 @@ func TestSendUpdate(t *testing.T) {
 	resp, err := mcw.SendUpdate(usend)
 	if err != nil {
 		t.Fatalf("error sending UPDATE: %v", err)
-	}
-	if !fl.IsFlushed() {
-		t.Errorf("flush not called after SendUpdate")
 	}
 
 	// channel sync: make sure received is set
@@ -290,20 +491,13 @@ func TestSendUpdate(t *testing.T) {
 	checkOK(t, resp, 12, 3)
 }
 
-func TestSendStop(t *testing.T) {
-	fl := newCheckFlusher()
-
-	tc := newTestConvo()
-	defer tc.Close()
-
-	syncCh, mcw, mcf := tc.syncCh, tc.mcw, tc.mcf
+func SendStopTest(tc convoTestRigger, t *testing.T) {
+	syncCh, mcw, mcf := tc.SyncCh(), tc.MCW(), tc.MCF()
 	received := Message{}
-
-	mcf.flusher = fl
 
 	mcw.OnMessageFunc(MTypeStop, func(msg Message) Message {
 		received = msg
-		tc.syncCh = nil
+		tc.NilSyncCh()
 		close(syncCh)
 		return OkayMessage(4, 3, msg.Seq)
 	})
@@ -314,10 +508,6 @@ func TestSendStop(t *testing.T) {
 	resp, err := mcf.SendStop(3)
 	if err != nil {
 		t.Fatalf("error sending STOP(3): %v", err)
-	}
-
-	if !fl.IsFlushed() {
-		t.Errorf("flush not called after SendStop")
 	}
 
 	// channel sync: make sure received is set
@@ -339,22 +529,13 @@ func TestSendStop(t *testing.T) {
 	checkOK(t, resp, 4, 3)
 }
 
-func TestSendHello(t *testing.T) {
-	flw := newCheckFlusher()
-	flf := newCheckFlusher()
-
-	tc := newTestConvo()
-	defer tc.Close()
-
-	syncCh, mcw, mcf := tc.syncCh, tc.mcw, tc.mcf
+func SendHelloTest(tc convoTestRigger, t *testing.T) {
+	syncCh, mcw, mcf := tc.SyncCh(), tc.MCW(), tc.MCF()
 	received := Message{}
-
-	mcf.flusher = flf
-	mcw.flusher = flw
 
 	mcf.OnMessageFunc(MTypeHello, func(msg Message) Message {
 		received = msg
-		tc.syncCh = nil
+		tc.NilSyncCh()
 		close(syncCh)
 		return OkayMessage(4, 3, msg.Seq)
 	})
@@ -369,18 +550,8 @@ func TestSendHello(t *testing.T) {
 	}
 	// log.Printf("received response: %v", resp)
 
-	if !flw.IsFlushed() {
-		t.Errorf("flush not called after SendHello")
-	}
-
 	// channel sync: make sure received is set
 	<-syncCh
-
-	if flushed := flf.IsFlushed(); !flushed {
-		// log.Printf("checked flusher %p: %v %v\n", flf, flf.IsFlushed(), flushed)
-		// t.Logf("checked flusher %p: %v %v\n", flf, flf.IsFlushed(), flushed)
-		t.Errorf("flush not called after replying to Hello")
-	}
 
 	if received.Type != MTypeHello {
 		t.Fatalf("expected stop message")
@@ -398,10 +569,7 @@ func TestSendHello(t *testing.T) {
 	checkOK(t, resp, 4, 3)
 }
 
-func TestSecondSendBlocksUntilReply(t *testing.T) {
-	tc := newTestConvo()
-	defer tc.Close()
-
+func SecondSendBlocksUntilReplyTest(tc convoTestRigger, t *testing.T) {
 	var (
 		order     = make(chan int, 4)
 		recvSync  = make(chan struct{})
@@ -410,7 +578,7 @@ func TestSecondSendBlocksUntilReply(t *testing.T) {
 		replWait  = make(chan struct{})
 	)
 
-	_, mcw, mcf := tc.syncCh, tc.mcw, tc.mcf
+	mcw, mcf := tc.MCW(), tc.MCF()
 
 	mcw.OnMessageFunc(MTypeJob, func(msg Message) Message {
 		// log.Printf("RECEIVED: JOB")
@@ -498,7 +666,7 @@ func TestSecondSendBlocksUntilReply(t *testing.T) {
 	}
 }
 
-func TestHoldMessageUntilReply(t *testing.T) {
+func HoldMessageUntilReplyTest(tc convoTestRigger, t *testing.T) {
 	var (
 		order       = make(chan int, 4)
 		sendWait    = make(chan struct{})
@@ -507,10 +675,7 @@ func TestHoldMessageUntilReply(t *testing.T) {
 		recvSignal2 = make(chan struct{})
 	)
 
-	tc := newTestConvo()
-	defer tc.Close()
-
-	mcw, mcf := tc.mcw, tc.mcf
+	mcw, mcf := tc.MCW(), tc.MCF()
 
 	mcw.OnMessageFunc(MTypeJob, func(msg Message) Message {
 		order <- 3
@@ -617,7 +782,7 @@ func TestHoldMessageUntilReply(t *testing.T) {
 		r1, r2, r3, r4)
 }
 
-func TestSequencesAreIncreasing(t *testing.T) {
+func SequencesAreIncreasingTest(tc convoTestRigger, t *testing.T) {
 	type seqTuple struct {
 		wh  int
 		seq uint32
@@ -628,10 +793,7 @@ func TestSequencesAreIncreasing(t *testing.T) {
 		seqlock sync.Mutex
 	)
 
-	tc := newTestConvo()
-	defer tc.Close()
-
-	mcw, mcf := tc.mcw, tc.mcf
+	mcw, mcf := tc.MCW(), tc.MCF()
 
 	addSeq := func(wh int, seq uint32) {
 		seqlock.Lock()
