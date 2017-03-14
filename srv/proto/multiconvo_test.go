@@ -3,14 +3,12 @@ package proto
 import (
 	"context"
 	"fmt"
-	"github.com/gorilla/websocket"
 	"github.com/sfstewman/fuq"
+	"github.com/sfstewman/fuq/fuqtest"
 	"io"
 	"io/ioutil"
 	"net"
-	"net/http"
 	"os"
-	"path/filepath"
 	"reflect"
 	"runtime"
 	"sync"
@@ -98,13 +96,7 @@ func newTestConvo() testConvo {
 }
 
 type wsConvo struct {
-	Http     http.Server
-	SConn    *websocket.Conn
-	CConn    *websocket.Conn
-	TmpDir   string
-	Listener net.Listener
-	Server   http.Server
-
+	pair       *fuqtest.WSPair
 	mcw, mcf   *MultiConvo
 	cancelFunc context.CancelFunc
 	syncCh     chan struct{}
@@ -117,11 +109,7 @@ func (wsc *wsConvo) Close() {
 
 	// shut down sync channel
 	closeIfNonNil(wsc.syncCh)
-
-	// wsc.Server.Shutdown()
-
-	wsc.Listener.Close()
-	os.Remove(wsc.TmpDir)
+	wsc.pair.Close()
 }
 
 func (wsc *wsConvo) MCW() *MultiConvo {
@@ -157,75 +145,14 @@ func newWebSocketConvo() *wsConvo {
 		panic(err)
 	}
 
-	// log.Printf("tmpdir = %s", tmpDir)
-	wsc.TmpDir = tmpDir
-	if err = os.Chmod(tmpDir, 0700); err != nil {
-		panic(err)
-	}
-
-	// XXX - is there a better/portable way?
-	socketPath := filepath.Join(tmpDir, "socket.web")
-	addr, err := net.ResolveUnixAddr("unix", socketPath)
-	if err != nil {
-		panic(err)
-	}
-
-	listener, err := net.ListenUnix("unix", addr)
-	if err != nil {
-		panic(err)
-	}
-
-	wsc.Listener = listener
-
-	connCh := make(chan *websocket.Conn)
-	handler := func(w http.ResponseWriter, r *http.Request) {
-		upgrader := websocket.Upgrader{
-			ReadBufferSize:  1024,
-			WriteBufferSize: 1024,
-		}
-
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			panic(err)
-		}
-
-		connCh <- conn
-	}
-
-	wsc.Http = http.Server{
-		Handler: http.HandlerFunc(handler),
-	}
-
-	// start the server side...
-	go wsc.Http.Serve(listener)
-
-	// start the client side...
-	conn, err := net.Dial("unix", socketPath)
-	if err != nil {
-		panic(err)
-	}
-
-	dialer := websocket.Dialer{
-		NetDial: func(network, addr string) (net.Conn, error) {
-			return conn, nil
-		},
-		ReadBufferSize:  1024,
-		WriteBufferSize: 1024,
-	}
-
-	cconn, _, err := dialer.Dial("ws://localhost", nil)
-	if err != nil {
-		panic(err)
-	}
-	wsc.CConn = cconn
-	wsc.SConn = <-connCh
+	wsc.pair = fuqtest.NewWSPair(tmpDir)
 
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	wsc.cancelFunc = cancelFunc
 
 	wsc.mcw = NewMultiConvo(MultiConvoOpts{
 		Messenger: WebsocketMessenger{
-			C:       wsc.CConn,
+			C:       wsc.pair.CConn,
 			Timeout: 60 * time.Second,
 		},
 		Context: ctx,
@@ -234,7 +161,7 @@ func newWebSocketConvo() *wsConvo {
 
 	wsc.mcf = NewMultiConvo(MultiConvoOpts{
 		Messenger: WebsocketMessenger{
-			C:       wsc.SConn,
+			C:       wsc.pair.SConn,
 			Timeout: 60 * time.Second,
 		},
 		Context: ctx,
