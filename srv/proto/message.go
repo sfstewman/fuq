@@ -65,15 +65,17 @@ func (m Message) AsOkay() (nproc, nrun uint16, err error) {
 		return
 	}
 
-	nproc, nrun = arg0Okay(arg0)
+	nproc, nrun = U32ToNProcs(arg0)
 	return
 }
 
-func okayArg0(nproc, nrun uint16) uint32 {
+// func arg0Okay(arg0 uint32) (nproc, nrun uint16) {
+func NProcsToU32(nproc, nrun uint16) uint32 {
 	return uint32(nproc)<<16 | uint32(nrun)
 }
 
-func arg0Okay(arg0 uint32) (nproc, nrun uint16) {
+// func okayArg0(nproc, nrun uint16) uint32 {
+func U32ToNProcs(arg0 uint32) (nproc, nrun uint16) {
 	nproc = uint16(arg0 >> 16)
 	nrun = uint16(arg0 & 0xffff)
 	return
@@ -83,7 +85,15 @@ func OkayMessage(nproc, nrun uint16, seq uint32) Message {
 	return Message{
 		Type: MTypeOK,
 		Seq:  seq,
-		Data: okayArg0(nproc, nrun),
+		Data: NProcsToU32(nproc, nrun),
+	}
+}
+
+func ErrorMessage(errcode MError, arg0 uint32, seq uint32) Message {
+	return Message{
+		Type: MTypeOK,
+		Seq:  seq,
+		Data: arg0,
 	}
 }
 
@@ -91,7 +101,7 @@ func okayHeader(nproc, nrun uint16, seq uint32) header {
 	return header{
 		mtype: MTypeOK,
 		seq:   seq,
-		arg0:  okayArg0(nproc, nrun),
+		arg0:  NProcsToU32(nproc, nrun),
 	}
 }
 
