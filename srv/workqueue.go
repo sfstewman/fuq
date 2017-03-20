@@ -16,7 +16,7 @@ import (
 type WorkPool struct {
 	W      []Worker
 	T      []fuq.Task
-	Config *WorkerConfig
+	Config *NodeConfig
 	E      *fuq.Endpoint
 	dialer websocket.Dialer
 	conn   *websocket.Conn

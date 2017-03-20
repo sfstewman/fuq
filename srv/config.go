@@ -14,42 +14,42 @@ const (
 	HelloMaxBackoff = 1 * time.Minute
 )
 
-type WorkerConfig struct {
+type NodeConfig struct {
 	mu       sync.RWMutex
 	cookie   fuq.Cookie
 	NodeInfo fuq.NodeInfo
 	allStop  bool
 }
 
-func NewWorkerConfig(nproc int, tags []string) (*WorkerConfig, error) {
+func NewNodeConfig(nproc int, tags []string) (*NodeConfig, error) {
 	ni, err := fuq.NewNodeInfo(nproc, tags...)
 	if err != nil {
 		return nil, err
 	}
 
-	return &WorkerConfig{NodeInfo: ni}, nil
+	return &NodeConfig{NodeInfo: ni}, nil
 }
 
-func (wc *WorkerConfig) IsStopped() bool {
+func (wc *NodeConfig) IsStopped() bool {
 	wc.mu.RLock()
 	defer wc.mu.RUnlock()
 	return wc.allStop
 }
 
-func (wc *WorkerConfig) Stop() {
+func (wc *NodeConfig) Stop() {
 	wc.mu.Lock()
 	defer wc.mu.Unlock()
 	wc.allStop = true
 }
 
-func (wc *WorkerConfig) Cookie() fuq.Cookie {
+func (wc *NodeConfig) Cookie() fuq.Cookie {
 	wc.mu.RLock()
 	defer wc.mu.RUnlock()
 
 	return wc.cookie
 }
 
-func (wc *WorkerConfig) NewCookie(ep *fuq.Endpoint) error {
+func (wc *NodeConfig) NewCookie(ep *fuq.Endpoint) error {
 	wc.mu.Lock()
 	defer wc.mu.Unlock()
 
@@ -74,7 +74,7 @@ func (wc *WorkerConfig) NewCookie(ep *fuq.Endpoint) error {
 	return nil
 }
 
-func (wc *WorkerConfig) NewCookieWithRetries(ep *fuq.Endpoint, maxtries int) error {
+func (wc *NodeConfig) NewCookieWithRetries(ep *fuq.Endpoint, maxtries int) error {
 	var err error
 	backoff := HelloBackoff
 
@@ -113,7 +113,7 @@ func (wc *WorkerConfig) NewCookieWithRetries(ep *fuq.Endpoint, maxtries int) err
 	return err
 }
 
-func (wc *WorkerConfig) RefreshCookie(ep *fuq.Endpoint, oldCookie fuq.Cookie) error {
+func (wc *NodeConfig) RefreshCookie(ep *fuq.Endpoint, oldCookie fuq.Cookie) error {
 	wc.mu.Lock()
 	defer wc.mu.Unlock()
 

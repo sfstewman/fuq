@@ -16,7 +16,7 @@ type Queuer interface {
 
 type Endpoint struct {
 	*fuq.Endpoint
-	Config *WorkerConfig
+	Config *NodeConfig
 	Logger *log.Logger
 }
 

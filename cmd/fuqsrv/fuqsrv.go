@@ -29,7 +29,7 @@ const (
 	HelloTries       = 10
 )
 
-func startWorkers(wcfg *srv.WorkerConfig, nproc int, config fuq.Config, wg *sync.WaitGroup) error {
+func startWorkers(wcfg *srv.NodeConfig, nproc int, config fuq.Config, wg *sync.WaitGroup) error {
 	if nproc <= 0 {
 		return nil
 	}
@@ -265,7 +265,7 @@ func main() {
 		tags = []string{workerTag}
 	}
 
-	wc, err := srv.NewWorkerConfig(nproc, tags)
+	wc, err := srv.NewNodeConfig(nproc, tags)
 	if err != nil {
 		log.Fatalf("error generating worker config: %v", err)
 	}
