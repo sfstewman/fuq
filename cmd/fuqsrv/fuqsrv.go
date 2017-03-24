@@ -9,6 +9,7 @@ package main
  */
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"github.com/sfstewman/fuq"
@@ -43,6 +44,7 @@ func startWorkers(wcfg *srv.NodeConfig, nproc int, config fuq.Config, wg *sync.W
 		return fmt.Errorf("error obtaining cookies: %v", err)
 	}
 
+	ctx := context.Background()
 	for i := 0; i < nproc; i++ {
 		log.Printf("Starting worker %d", i+1)
 		wg.Add(1)
@@ -79,7 +81,7 @@ func startWorkers(wcfg *srv.NodeConfig, nproc int, config fuq.Config, wg *sync.W
 			}
 			defer w.Close()
 
-			w.Loop()
+			w.Loop(ctx)
 		}(i + 1)
 	}
 

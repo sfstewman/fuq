@@ -34,25 +34,19 @@ type NopFlusher struct{}
 func (NopFlusher) Flush() {}
 
 type MultiConvo struct {
-	messenger Messenger
-	// conn     net.Conn
-	// flusher  http.Flusher
-	seq      Sequencer
-	isWorker bool
-
-	ctx context.Context
-
-	handlers [256]MessageHandler
-
+	handlers   [256]MessageHandler
+	messenger  Messenger
+	seq        Sequencer
 	outgoingCh chan outgoingMessage
 
 	Timeout time.Duration
+
+	isWorker bool
 }
 
 type MultiConvoOpts struct {
 	Messenger Messenger
 	Flusher   http.Flusher
-	Context   context.Context
 	Worker    bool
 }
 
@@ -61,7 +55,6 @@ func NewMultiConvo(opts MultiConvoOpts) *MultiConvo {
 		messenger:  opts.Messenger,
 		seq:        &LockedSequence{},
 		isWorker:   opts.Worker,
-		ctx:        opts.Context,
 		outgoingCh: make(chan outgoingMessage),
 	}
 }
@@ -107,7 +100,7 @@ func (mc *MultiConvo) OnMessageFunc(mt MType, f MessageHandlerFunc) {
 	mc.OnMessage(mt, f)
 }
 
-func (mc *MultiConvo) incomingLoop(msgCh chan<- Message, errorCh chan<- reply, done <-chan struct{}) {
+func (mc *MultiConvo) incomingLoop(ctx context.Context, msgCh chan<- Message, errorCh chan<- reply) {
 	defer close(msgCh)
 	defer func() {
 		if r := recover(); r != nil {
@@ -122,7 +115,7 @@ func (mc *MultiConvo) incomingLoop(msgCh chan<- Message, errorCh chan<- reply, d
 	// defer log.Printf("--[ mc(%p) incoming loop stopping ]--", mc)
 
 	for {
-		done := mc.ctx.Done()
+		done := ctx.Done()
 
 		// check done channel before we receive a message
 		select {
@@ -199,7 +192,7 @@ func (mc *MultiConvo) dispatchMessage(m Message) error {
 	return mc.xmit(resp)
 }
 
-func (mc *MultiConvo) ConversationLoop() error {
+func (mc *MultiConvo) ConversationLoop(ctx context.Context) error {
 	var (
 		outgoingCh chan outgoingMessage
 
@@ -208,15 +201,15 @@ func (mc *MultiConvo) ConversationLoop() error {
 
 		pending *Message
 
-		errorCh    chan reply    = make(chan reply, 1)
-		incomingCh chan Message  = make(chan Message)
-		closingCh  chan struct{} = make(chan struct{})
+		errorCh    chan reply   = make(chan reply, 1)
+		incomingCh chan Message = make(chan Message)
 	)
 
-	defer close(closingCh)
+	incomingCtx, cancelFunc := context.WithCancel(ctx)
+	defer cancelFunc()
 	// defer log.Printf("%p --> CL: STOP", mc)
 
-	go mc.incomingLoop(incomingCh, errorCh, closingCh)
+	go mc.incomingLoop(incomingCtx, incomingCh, errorCh)
 
 	// log.Printf("%p --> CL: START", mc)
 
@@ -226,7 +219,7 @@ recv_loop:
 		if replyCh == nil {
 			outgoingCh = mc.outgoingCh
 		}
-		done := mc.ctx.Done()
+		done := ctx.Done()
 
 		select {
 		case msg := <-outgoingCh:
@@ -300,7 +293,7 @@ recv_loop:
 	return nil
 }
 
-func (mc *MultiConvo) sendMessage(mt MType, data interface{}) (Message, error) {
+func (mc *MultiConvo) sendMessage(ctx context.Context, mt MType, data interface{}) (Message, error) {
 	m := Message{Type: mt, Data: data}
 	replyCh := make(chan reply)
 	mc.outgoingCh <- outgoingMessage{M: m, R: replyCh}
@@ -309,28 +302,28 @@ func (mc *MultiConvo) sendMessage(mt MType, data interface{}) (Message, error) {
 	case repl := <-replyCh:
 		// log.Printf("reply: %v", repl)
 		return repl.M, repl.E
-	case <-mc.ctx.Done():
-		return Message{}, mc.ctx.Err()
+	case <-ctx.Done():
+		return Message{}, ctx.Err()
 	}
 }
 
-func (mc *MultiConvo) SendJob(job []fuq.Task) (Message, error) {
-	return mc.sendMessage(MTypeJob, &job)
+func (mc *MultiConvo) SendJob(ctx context.Context, job []fuq.Task) (Message, error) {
+	return mc.sendMessage(ctx, MTypeJob, &job)
 }
 
-func (mc *MultiConvo) SendUpdate(update fuq.JobStatusUpdate) (Message, error) {
-	return mc.sendMessage(MTypeUpdate, &update)
+func (mc *MultiConvo) SendUpdate(ctx context.Context, update fuq.JobStatusUpdate) (Message, error) {
+	return mc.sendMessage(ctx, MTypeUpdate, &update)
 }
 
-func (mc *MultiConvo) SendStop(nproc uint32) (Message, error) {
-	return mc.sendMessage(MTypeStop, nproc)
+func (mc *MultiConvo) SendStop(ctx context.Context, nproc uint32) (Message, error) {
+	return mc.sendMessage(ctx, MTypeStop, nproc)
 }
 
-func (mc *MultiConvo) SendStopImmed() error {
-	_, err := mc.sendMessage(MTypeStop, StopImmed)
+func (mc *MultiConvo) SendStopImmed(ctx context.Context) error {
+	_, err := mc.sendMessage(ctx, MTypeStop, StopImmed)
 	return err
 }
 
-func (mc *MultiConvo) SendHello(hello HelloData) (Message, error) {
-	return mc.sendMessage(MTypeHello, &hello)
+func (mc *MultiConvo) SendHello(ctx context.Context, hello HelloData) (Message, error) {
+	return mc.sendMessage(ctx, MTypeHello, &hello)
 }

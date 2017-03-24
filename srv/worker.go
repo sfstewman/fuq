@@ -1,6 +1,7 @@
 package srv
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"github.com/sfstewman/fuq"
@@ -18,25 +19,50 @@ type Stopper interface {
 	Stop()
 }
 
+type SimpleStopper struct {
+	S chan struct{}
+}
+
+func (s SimpleStopper) Stop() {
+	if s.S != nil {
+		close(s.S)
+	}
+}
+
+func (s SimpleStopper) IsStopped() bool {
+	select {
+	case <-s.S:
+		return true
+	default:
+		return s.S == nil
+	}
+}
+
+var (
+	_ Stopper = SimpleStopper{}
+)
+
+type stopAllKey struct{}
+
 type Worker struct {
-	Seq           int
-	Logger        *log.Logger
-	Runner        Runner
-	Stopper       Stopper
-	Stop          bool
+	Seq    int
+	Logger *log.Logger
+	Runner Runner
+	// Stopper       Stopper
 	Queuer        Queuer
 	DefaultLogDir string
 	NumWaits      int
+	Stop          bool
 }
 
 type Runner interface {
-	Run(fuq.Task, *Worker) (fuq.JobStatusUpdate, error)
+	Run(context.Context, fuq.Task, *Worker) (fuq.JobStatusUpdate, error)
 }
 
-type RunnerFunc func(fuq.Task, *Worker) (fuq.JobStatusUpdate, error)
+type RunnerFunc func(context.Context, fuq.Task, *Worker) (fuq.JobStatusUpdate, error)
 
-func (f RunnerFunc) Run(t fuq.Task, w *Worker) (fuq.JobStatusUpdate, error) {
-	return f(t, w)
+func (f RunnerFunc) Run(ctx context.Context, t fuq.Task, w *Worker) (fuq.JobStatusUpdate, error) {
+	return f(ctx, t, w)
 }
 
 func (w *Worker) LogIfError(err error, pfxFmt string, args ...interface{}) {
@@ -56,25 +82,32 @@ func (w *Worker) Log(format string, args ...interface{}) {
 	}
 }
 
-func (w *Worker) RunJob(t fuq.Task) (fuq.JobStatusUpdate, error) {
+func (w *Worker) RunJob(ctx context.Context, t fuq.Task) (fuq.JobStatusUpdate, error) {
 	runner := w.Runner
 	if runner == nil {
-		return defaultRunner(t, w)
+		return defaultRunner(ctx, t, w)
 	}
 
-	return runner.Run(t, w)
+	return runner.Run(ctx, t, w)
 }
 
-func (w *Worker) Loop() {
+func (w *Worker) Loop(ctx context.Context) {
 	var (
 		req WorkerAction
 		err error
 	)
 
-	for !w.Stopper.IsStopped() {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			/* nop */
+		}
+
 		if req == nil {
 			// request a job from the foreman
-			req, err = w.Queuer.RequestAction(1)
+			req, err = w.Queuer.RequestAction(ctx, 1)
 		}
 
 		if err != nil {
@@ -82,7 +115,7 @@ func (w *Worker) Loop() {
 			req = WaitAction{}
 		}
 
-		upd, err := req.Act(w)
+		upd, err := req.Act(ctx, w)
 		if err == ErrStopCond {
 			return
 		}
@@ -94,7 +127,7 @@ func (w *Worker) Loop() {
 			continue
 		}
 
-		req, err = w.Queuer.UpdateAndRequestAction(*upd, 1)
+		req, err = w.Queuer.UpdateAndRequestAction(ctx, *upd, 1)
 	}
 }
 

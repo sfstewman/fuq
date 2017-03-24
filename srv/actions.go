@@ -1,6 +1,7 @@
 package srv
 
 import (
+	"context"
 	"fmt"
 	"github.com/sfstewman/fuq"
 	"math/rand"
@@ -23,14 +24,14 @@ const (
 //
 // Not an -er name, but couldn't find a better name for this.
 type WorkerAction interface {
-	Act(*Worker) (*fuq.JobStatusUpdate, error)
+	Act(context.Context, *Worker) (*fuq.JobStatusUpdate, error)
 }
 
 // NopAction is an action that does nothing (a nop).  Useful for
 // testing.
 type NopAction struct{}
 
-func (NopAction) Act(*Worker) (*fuq.JobStatusUpdate, error) {
+func (NopAction) Act(context.Context, *Worker) (*fuq.JobStatusUpdate, error) {
 	return nil, nil
 }
 
@@ -38,23 +39,40 @@ type WaitAction struct {
 	Interval time.Duration
 }
 
-func (w WaitAction) Act(worker *Worker) (*fuq.JobStatusUpdate, error) {
-	w.Wait()
-	worker.NumWaits++
-	return nil, nil
-}
-
-func (w WaitAction) Wait() time.Duration {
-	delay := w.PickWaitTime()
-	if delay > 0 {
-		time.Sleep(delay)
+func (w WaitAction) Act(ctx context.Context, worker *Worker) (*fuq.JobStatusUpdate, error) {
+	waiter := w.Waiter()
+	if waiter == nil {
+		return nil, nil
 	}
 
+	select {
+	case <-waiter:
+		worker.NumWaits++
+		return nil, nil
+
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (w WaitAction) Waiter() <-chan time.Time {
+	delay := w.PickWaitTime()
 	if delay > MaxWait {
 		delay = MaxWait
 	}
 
-	return delay
+	if delay <= 0 {
+		return nil
+	}
+
+	return time.After(delay)
+}
+
+func (w WaitAction) Wait() {
+	waiter := w.Waiter()
+	if waiter != nil {
+		<-waiter
+	}
 }
 
 func (w WaitAction) PickWaitTime() time.Duration {
@@ -75,25 +93,36 @@ type StopAction struct {
 	All bool
 }
 
-func (s StopAction) Act(w *Worker) (*fuq.JobStatusUpdate, error) {
-	if s.All && w.Stopper != nil {
-		w.Stopper.Stop()
+func (s StopAction) Act(ctx context.Context, w *Worker) (*fuq.JobStatusUpdate, error) {
+	if !s.All {
+		return nil, ErrStopCond
 	}
+
+	// stop all
+	v := ctx.Value(stopAllKey{})
+	if v == nil {
+		return nil, ErrStopCond
+	}
+
+	if stopFunc, ok := v.(context.CancelFunc); ok {
+		stopFunc()
+	}
+
 	return nil, ErrStopCond
 }
 
 type RunAction fuq.Task
 
-func (r RunAction) Run(w *Worker) (fuq.JobStatusUpdate, error) {
-	return w.RunJob(fuq.Task(r))
+func (r RunAction) Run(ctx context.Context, w *Worker) (fuq.JobStatusUpdate, error) {
+	return w.RunJob(ctx, fuq.Task(r))
 }
 
-func (r RunAction) Act(w *Worker) (*fuq.JobStatusUpdate, error) {
-	upd, err := r.Run(w)
+func (r RunAction) Act(ctx context.Context, w *Worker) (*fuq.JobStatusUpdate, error) {
+	upd, err := r.Run(ctx, w)
 	return &upd, err
 }
 
-func defaultRunner(t fuq.Task, w *Worker) (fuq.JobStatusUpdate, error) {
+func defaultRunner(ctx context.Context, t fuq.Task, w *Worker) (fuq.JobStatusUpdate, error) {
 	status := fuq.JobStatusUpdate{
 		JobId: t.JobId,
 		Task:  t.Task,
@@ -103,7 +132,7 @@ func defaultRunner(t fuq.Task, w *Worker) (fuq.JobStatusUpdate, error) {
 		t.LoggingDir = w.DefaultLogDir
 	}
 
-	runner := exec.Command(t.Command, strconv.Itoa(t.Task))
+	runner := exec.CommandContext(ctx, t.Command, strconv.Itoa(t.Task))
 	runner.Dir = t.WorkingDir
 
 	/* XXX add logging directory option */

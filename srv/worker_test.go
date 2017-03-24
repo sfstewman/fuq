@@ -1,6 +1,7 @@
 package srv
 
 import (
+	"context"
 	"github.com/sfstewman/fuq"
 	"testing"
 	"time"
@@ -11,7 +12,7 @@ type ChanQueuer struct {
 	S chan struct{}
 }
 
-func (cq ChanQueuer) RequestAction(nproc int) (WorkerAction, error) {
+func (cq ChanQueuer) RequestAction(ctx context.Context, nproc int) (WorkerAction, error) {
 	select {
 	case act, ok := <-cq.Q:
 		if !ok {
@@ -20,7 +21,11 @@ func (cq ChanQueuer) RequestAction(nproc int) (WorkerAction, error) {
 		}
 
 		return act, nil
+
 	case <-cq.S:
+		goto stop
+
+	case <-ctx.Done():
 		goto stop
 	}
 
@@ -28,35 +33,17 @@ stop:
 	return StopAction{false}, nil
 }
 
-func (cq ChanQueuer) UpdateAndRequestAction(status fuq.JobStatusUpdate, nproc int) (WorkerAction, error) {
-	return cq.RequestAction(nproc)
-}
-
-type SimpleStopper struct {
-	S chan struct{}
-}
-
-func (s SimpleStopper) Stop() {
-	if s.S != nil {
-		close(s.S)
-	}
-}
-
-func (s SimpleStopper) IsStopped() bool {
-	select {
-	case <-s.S:
-		return true
-	default:
-		return s.S == nil
-	}
+func (cq ChanQueuer) UpdateAndRequestAction(ctx context.Context, status fuq.JobStatusUpdate, nproc int) (WorkerAction, error) {
+	return cq.RequestAction(ctx, nproc)
 }
 
 type testingWorker struct {
 	Worker
-	stopper  SimpleStopper
 	stopCh   chan struct{}
 	actionCh chan WorkerAction
 	doneCh   chan struct{}
+	ctx      context.Context
+	cancel   context.CancelFunc
 }
 
 func makeTestingWorker() *testingWorker {
@@ -66,10 +53,10 @@ func makeTestingWorker() *testingWorker {
 	w.actionCh = make(chan WorkerAction)
 	w.doneCh = make(chan struct{})
 
-	w.stopper = SimpleStopper{w.stopCh}
+	w.ctx, w.cancel = context.WithCancel(context.Background())
+
 	w.Worker = Worker{
-		Stopper: w.stopper,
-		Queuer:  ChanQueuer{w.actionCh, w.stopCh},
+		Queuer: ChanQueuer{w.actionCh, w.stopCh},
 	}
 
 	return &w
@@ -79,7 +66,7 @@ func TestLoopStop(t *testing.T) {
 	w := makeTestingWorker()
 
 	go func() {
-		w.Loop()
+		w.Loop(w.ctx)
 		close(w.doneCh)
 	}()
 
@@ -91,7 +78,7 @@ func TestLoopWait(t *testing.T) {
 	w := makeTestingWorker()
 
 	go func() {
-		w.Loop()
+		w.Loop(w.ctx)
 		close(w.doneCh)
 	}()
 
@@ -120,7 +107,7 @@ func TestLoopWait(t *testing.T) {
 		}
 	}
 
-	w.stopper.Stop()
+	w.cancel()
 	// make sure we actually stop!
 	<-w.doneCh
 }
@@ -132,7 +119,7 @@ type testRunner struct {
 	E error
 }
 
-func (r *testRunner) Run(t fuq.Task, w *Worker) (fuq.JobStatusUpdate, error) {
+func (r *testRunner) Run(ctx context.Context, t fuq.Task, w *Worker) (fuq.JobStatusUpdate, error) {
 	r.T = t
 	r.R++
 	return r.S, r.E
@@ -163,7 +150,7 @@ func TestLoopRun(t *testing.T) {
 	w.Worker.Runner = r
 
 	go func() {
-		w.Loop()
+		w.Loop(w.ctx)
 		close(w.doneCh)
 	}()
 

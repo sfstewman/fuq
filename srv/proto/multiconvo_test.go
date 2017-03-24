@@ -24,6 +24,8 @@ type convoTestRigger interface {
 	SyncCh() chan struct{}
 	NilSyncCh()
 
+	Context() context.Context
+
 	Close()
 }
 
@@ -42,6 +44,7 @@ type testConvo struct {
 	pworker, pforeman net.Conn
 	mcw1, mcf1        *MultiConvo
 
+	ctx        context.Context
 	cancelFunc context.CancelFunc
 
 	syncCh1 chan struct{}
@@ -63,22 +66,23 @@ func (tc *testConvo) NilSyncCh() {
 	tc.syncCh1 = nil
 }
 
+func (tc *testConvo) Context() context.Context {
+	return tc.ctx
+}
+
 func newTestConvo() testConvo {
 	tc := testConvo{}
 
 	tc.pworker, tc.pforeman = net.Pipe()
 
-	ctx, cancelFunc := context.WithCancel(context.Background())
-
-	tc.cancelFunc = cancelFunc
+	tc.ctx, tc.cancelFunc = context.WithCancel(context.Background())
 
 	tc.mcw1 = NewMultiConvo(MultiConvoOpts{
 		Messenger: ConnMessenger{
 			Conn:    tc.pworker,
 			Flusher: NopFlusher{},
 		},
-		Context: ctx,
-		Worker:  true,
+		Worker: true,
 	})
 
 	tc.mcf1 = NewMultiConvo(MultiConvoOpts{
@@ -86,8 +90,7 @@ func newTestConvo() testConvo {
 			Conn:    tc.pforeman,
 			Flusher: NopFlusher{},
 		},
-		Context: ctx,
-		Worker:  false,
+		Worker: false,
 	})
 
 	tc.syncCh1 = make(chan struct{})
@@ -98,6 +101,7 @@ func newTestConvo() testConvo {
 type wsConvo struct {
 	pair       *fuqtest.WSPair
 	mcw, mcf   *MultiConvo
+	ctx        context.Context
 	cancelFunc context.CancelFunc
 	syncCh     chan struct{}
 }
@@ -128,6 +132,10 @@ func (wsc *wsConvo) NilSyncCh() {
 	wsc.syncCh = nil
 }
 
+func (wsc *wsConvo) Context() context.Context {
+	return wsc.ctx
+}
+
 func newWebSocketConvo() *wsConvo {
 	wsc := wsConvo{}
 	defer func() {
@@ -147,16 +155,14 @@ func newWebSocketConvo() *wsConvo {
 
 	wsc.pair = fuqtest.NewWSPair(tmpDir)
 
-	ctx, cancelFunc := context.WithCancel(context.Background())
-	wsc.cancelFunc = cancelFunc
+	wsc.ctx, wsc.cancelFunc = context.WithCancel(context.Background())
 
 	wsc.mcw = NewMultiConvo(MultiConvoOpts{
 		Messenger: WebsocketMessenger{
 			C:       wsc.pair.CConn,
 			Timeout: 60 * time.Second,
 		},
-		Context: ctx,
-		Worker:  true,
+		Worker: true,
 	})
 
 	wsc.mcf = NewMultiConvo(MultiConvoOpts{
@@ -164,8 +170,7 @@ func newWebSocketConvo() *wsConvo {
 			C:       wsc.pair.SConn,
 			Timeout: 60 * time.Second,
 		},
-		Context: ctx,
-		Worker:  false,
+		Worker: false,
 	})
 
 	wsc.syncCh = make(chan struct{})
@@ -224,12 +229,12 @@ func (t *testConvo) Close() {
 
 // goPanicOnError Starts a goroutine that will panic if f returns a
 // non-nil error value
-func goPanicOnError(f func() error) {
+func goPanicOnError(ctx context.Context, f func(context.Context) error) {
 	trace := make([]byte, 2048)
 	n := runtime.Stack(trace, false)
 	trace = trace[:n]
 	go func() {
-		if err := f(); err != nil {
+		if err := f(ctx); err != nil {
 			panic(fmt.Sprintf("%s\n\nconversation loop error: %v", trace, err))
 		}
 	}()
@@ -271,12 +276,13 @@ func OnMessageTest(tc convoTestRigger, t *testing.T) {
 		return OkayMessage(17, 5, msg.Seq)
 	})
 
-	goPanicOnError(mcw.ConversationLoop)
-	goPanicOnError(mcf.ConversationLoop)
+	ctx := tc.Context()
+	goPanicOnError(ctx, mcw.ConversationLoop)
+	goPanicOnError(ctx, mcf.ConversationLoop)
 
 	job := fuq.Task{Task: 23, JobDescription: fuq.JobDescription{JobId: fuq.JobId(7)}}
 
-	msg, err := mcf.SendJob([]fuq.Task{job})
+	msg, err := mcf.SendJob(ctx, []fuq.Task{job})
 	rnp, rnr, err := msg.AsOkay()
 	if err != nil {
 		t.Fatalf("error decoding OK return: %v", err)
@@ -334,8 +340,9 @@ func SendJobTest(tc convoTestRigger, t *testing.T) {
 		return OkayMessage(17, 5, msg.Seq)
 	})
 
-	goPanicOnError(mcw.ConversationLoop)
-	goPanicOnError(mcf.ConversationLoop)
+	ctx := tc.Context()
+	goPanicOnError(ctx, mcw.ConversationLoop)
+	goPanicOnError(ctx, mcf.ConversationLoop)
 
 	tsend := []fuq.Task{
 		fuq.Task{
@@ -352,7 +359,7 @@ func SendJobTest(tc convoTestRigger, t *testing.T) {
 		},
 	}
 
-	repl, err := mcf.SendJob(tsend)
+	repl, err := mcf.SendJob(ctx, tsend)
 	if err != nil {
 		t.Fatalf("error sending JOB: %v", err)
 	}
@@ -384,8 +391,9 @@ func SendUpdateTest(tc convoTestRigger, t *testing.T) {
 		return OkayMessage(12, 3, msg.Seq)
 	})
 
-	goPanicOnError(mcw.ConversationLoop)
-	goPanicOnError(mcf.ConversationLoop)
+	ctx := tc.Context()
+	goPanicOnError(ctx, mcw.ConversationLoop)
+	goPanicOnError(ctx, mcf.ConversationLoop)
 
 	usend := fuq.JobStatusUpdate{
 		JobId:   fuq.JobId(7),
@@ -394,7 +402,7 @@ func SendUpdateTest(tc convoTestRigger, t *testing.T) {
 		Status:  "done",
 	}
 
-	resp, err := mcw.SendUpdate(usend)
+	resp, err := mcw.SendUpdate(ctx, usend)
 	if err != nil {
 		t.Fatalf("error sending UPDATE: %v", err)
 	}
@@ -429,10 +437,11 @@ func SendStopTest(tc convoTestRigger, t *testing.T) {
 		return OkayMessage(4, 3, msg.Seq)
 	})
 
-	goPanicOnError(mcw.ConversationLoop)
-	goPanicOnError(mcf.ConversationLoop)
+	ctx := tc.Context()
+	goPanicOnError(ctx, mcw.ConversationLoop)
+	goPanicOnError(ctx, mcf.ConversationLoop)
 
-	resp, err := mcf.SendStop(3)
+	resp, err := mcf.SendStop(ctx, 3)
 	if err != nil {
 		t.Fatalf("error sending STOP(3): %v", err)
 	}
@@ -467,11 +476,12 @@ func SendHelloTest(tc convoTestRigger, t *testing.T) {
 		return OkayMessage(4, 3, msg.Seq)
 	})
 
-	goPanicOnError(mcw.ConversationLoop)
-	goPanicOnError(mcf.ConversationLoop)
+	ctx := tc.Context()
+	goPanicOnError(ctx, mcw.ConversationLoop)
+	goPanicOnError(ctx, mcf.ConversationLoop)
 
 	hello := HelloData{NumProcs: 11}
-	resp, err := mcw.SendHello(hello)
+	resp, err := mcw.SendHello(ctx, hello)
 	if err != nil {
 		t.Fatalf("error sending STOP(3): %v", err)
 	}
@@ -517,13 +527,14 @@ func SecondSendBlocksUntilReplyTest(tc convoTestRigger, t *testing.T) {
 		return OkayMessage(17, 5, msg.Seq)
 	})
 
-	goPanicOnError(mcw.ConversationLoop)
-	goPanicOnError(mcf.ConversationLoop)
+	ctx := tc.Context()
+	goPanicOnError(ctx, mcw.ConversationLoop)
+	goPanicOnError(ctx, mcf.ConversationLoop)
 
 	// first send
 	go func() {
 		<-sendWait1
-		_, err := mcf.SendJob([]fuq.Task{
+		_, err := mcf.SendJob(ctx, []fuq.Task{
 			fuq.Task{
 				Task:           23,
 				JobDescription: fuq.JobDescription{JobId: fuq.JobId(7)},
@@ -546,7 +557,7 @@ func SecondSendBlocksUntilReplyTest(tc convoTestRigger, t *testing.T) {
 	// second send
 	go func() {
 		<-sendWait2
-		_, err := mcf.SendJob([]fuq.Task{
+		_, err := mcf.SendJob(ctx, []fuq.Task{
 			fuq.Task{
 				Task:           24,
 				JobDescription: fuq.JobDescription{JobId: fuq.JobId(7)},
@@ -625,8 +636,9 @@ func HoldMessageUntilReplyTest(tc convoTestRigger, t *testing.T) {
 		return OkayMessage(18, 4, msg.Seq)
 	})
 
-	goPanicOnError(mcw.ConversationLoop)
-	goPanicOnError(mcf.ConversationLoop)
+	ctx := tc.Context()
+	goPanicOnError(ctx, mcw.ConversationLoop)
+	goPanicOnError(ctx, mcf.ConversationLoop)
 
 	job := fuq.Task{
 		Task:           23,
@@ -643,7 +655,7 @@ func HoldMessageUntilReplyTest(tc convoTestRigger, t *testing.T) {
 	// send first message
 	go func() {
 		<-sendWait
-		_, err := mcf.SendJob([]fuq.Task{job})
+		_, err := mcf.SendJob(ctx, []fuq.Task{job})
 		if err != nil {
 			panic(fmt.Sprintf("error sending job: %v", err))
 		}
@@ -658,7 +670,7 @@ func HoldMessageUntilReplyTest(tc convoTestRigger, t *testing.T) {
 
 	go func() {
 		<-sendWait
-		_, err := mcw.SendUpdate(upd)
+		_, err := mcw.SendUpdate(ctx, upd)
 		if err != nil {
 			t.Fatalf("error sending update: %v", err)
 		}
@@ -750,8 +762,9 @@ func SequencesAreIncreasingTest(tc convoTestRigger, t *testing.T) {
 		return OkayMessage(18, 4, msg.Seq)
 	})
 
-	goPanicOnError(mcw.ConversationLoop)
-	goPanicOnError(mcf.ConversationLoop)
+	ctx := tc.Context()
+	goPanicOnError(ctx, mcw.ConversationLoop)
+	goPanicOnError(ctx, mcf.ConversationLoop)
 
 	for i := 23; i <= 25; i++ {
 		task := fuq.Task{
@@ -759,7 +772,7 @@ func SequencesAreIncreasingTest(tc convoTestRigger, t *testing.T) {
 			JobDescription: fuq.JobDescription{JobId: fuq.JobId(7)},
 		}
 
-		if _, err := mcf.SendJob([]fuq.Task{task}); err != nil {
+		if _, err := mcf.SendJob(ctx, []fuq.Task{task}); err != nil {
 			panic(fmt.Errorf("error sending job: %v", err))
 		}
 	}
@@ -771,7 +784,7 @@ func SequencesAreIncreasingTest(tc convoTestRigger, t *testing.T) {
 			Success: true,
 			Status:  "done",
 		}
-		if _, err := mcw.SendUpdate(upd); err != nil {
+		if _, err := mcw.SendUpdate(ctx, upd); err != nil {
 			panic(fmt.Errorf("error sending job: %v", err))
 		}
 	}
@@ -782,7 +795,7 @@ func SequencesAreIncreasingTest(tc convoTestRigger, t *testing.T) {
 			JobDescription: fuq.JobDescription{JobId: fuq.JobId(7)},
 		}
 
-		if _, err := mcf.SendJob([]fuq.Task{task}); err != nil {
+		if _, err := mcf.SendJob(ctx, []fuq.Task{task}); err != nil {
 			panic(fmt.Errorf("error sending job: %v", err))
 		}
 
@@ -792,7 +805,7 @@ func SequencesAreIncreasingTest(tc convoTestRigger, t *testing.T) {
 			Success: true,
 			Status:  "done",
 		}
-		if _, err := mcw.SendUpdate(upd); err != nil {
+		if _, err := mcw.SendUpdate(ctx, upd); err != nil {
 			panic(fmt.Errorf("error sending job: %v", err))
 		}
 	}

@@ -1,6 +1,7 @@
 package srv
 
 import (
+	"context"
 	"github.com/sfstewman/fuq"
 	"log"
 )
@@ -10,8 +11,8 @@ const (
 )
 
 type Queuer interface {
-	RequestAction(nproc int) (WorkerAction, error)
-	UpdateAndRequestAction(status fuq.JobStatusUpdate, nproc int) (WorkerAction, error)
+	RequestAction(ctx context.Context, nproc int) (WorkerAction, error)
+	UpdateAndRequestAction(ctx context.Context, status fuq.JobStatusUpdate, nproc int) (WorkerAction, error)
 }
 
 type Endpoint struct {
