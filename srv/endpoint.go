@@ -2,8 +2,9 @@ package srv
 
 import (
 	"context"
-	"github.com/sfstewman/fuq"
 	"log"
+
+	"github.com/sfstewman/fuq"
 )
 
 const (
@@ -29,7 +30,7 @@ func (ep *Endpoint) RefreshCookie(oldCookie fuq.Cookie) error {
 	return ep.Config.RefreshCookie(ep.Endpoint, oldCookie)
 }
 
-func (w *Endpoint) RequestAction(nproc int) (WorkerAction, error) {
+func (w *Endpoint) RequestAction(ctx context.Context, nproc int) (WorkerAction, error) {
 	cookie := w.Cookie()
 
 	req := NodeRequestEnvelope{
@@ -81,7 +82,7 @@ retry:
 	return act, nil
 }
 
-func (w *Endpoint) UpdateAndRequestAction(status fuq.JobStatusUpdate, nproc int) (WorkerAction, error) {
+func (w *Endpoint) UpdateAndRequestAction(ctx context.Context, status fuq.JobStatusUpdate, nproc int) (WorkerAction, error) {
 	if nproc > 0 {
 		status.NewJob = &fuq.JobRequest{NumProc: nproc}
 	}

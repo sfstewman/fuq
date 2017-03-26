@@ -44,11 +44,15 @@ var (
 
 type stopAllKey struct{}
 
+func WorkerContext(parent context.Context) context.Context {
+	stopCtx, stopFunc := context.WithCancel(parent)
+	return context.WithValue(stopCtx, stopAllKey{}, stopFunc)
+}
+
 type Worker struct {
-	Seq    int
-	Logger *log.Logger
-	Runner Runner
-	// Stopper       Stopper
+	Seq           int
+	Logger        *log.Logger
+	Runner        Runner
 	Queuer        Queuer
 	DefaultLogDir string
 	NumWaits      int
