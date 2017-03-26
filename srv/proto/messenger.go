@@ -9,6 +9,9 @@ import (
 )
 
 type Messenger interface {
+	Dial() error
+	Close() error
+
 	Send(m Message) error
 	Receive() (Message, error)
 }
@@ -38,9 +41,27 @@ func (m ConnMessenger) Receive() (Message, error) {
 	return ReceiveMessage(m.Conn)
 }
 
+func (m ConnMessenger) Dial() error {
+	// XXX - do something useful here
+	return nil
+}
+
+func (m ConnMessenger) Close() error {
+	return m.Conn.Close()
+}
+
 type WebsocketMessenger struct {
 	C       *websocket.Conn
 	Timeout time.Duration
+}
+
+func (ws WebsocketMessenger) Dial() error {
+	// XXX - do something useful here
+	return nil
+}
+
+func (ws WebsocketMessenger) Close() error {
+	return ws.C.Close()
 }
 
 func (ws WebsocketMessenger) Send(msg Message) error {
