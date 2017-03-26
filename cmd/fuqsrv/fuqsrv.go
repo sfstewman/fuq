@@ -44,7 +44,8 @@ func startWorkers(wcfg *srv.NodeConfig, nproc int, config fuq.Config, wg *sync.W
 		return fmt.Errorf("error obtaining cookies: %v", err)
 	}
 
-	ctx := context.Background()
+	workerCtx := srv.WorkerContext(context.Background())
+
 	for i := 0; i < nproc; i++ {
 		log.Printf("Starting worker %d", i+1)
 		wg.Add(1)
@@ -75,13 +76,12 @@ func startWorkers(wcfg *srv.NodeConfig, nproc int, config fuq.Config, wg *sync.W
 			w := srv.Worker{
 				Seq:           seq,
 				Queuer:        q,
-				Stopper:       wcfg,
 				DefaultLogDir: logDir,
 				Logger:        logger,
 			}
 			defer w.Close()
 
-			w.Loop(ctx)
+			w.Loop(workerCtx)
 		}(i + 1)
 	}
 
