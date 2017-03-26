@@ -33,7 +33,7 @@ type NopFlusher struct{}
 
 func (NopFlusher) Flush() {}
 
-type MultiConvo struct {
+type Conn struct {
 	handlers   [256]MessageHandler
 	messenger  Messenger
 	seq        Sequencer
@@ -44,14 +44,14 @@ type MultiConvo struct {
 	isWorker bool
 }
 
-type MultiConvoOpts struct {
+type Opts struct {
 	Messenger Messenger
 	Flusher   http.Flusher
 	Worker    bool
 }
 
-func NewMultiConvo(opts MultiConvoOpts) *MultiConvo {
-	return &MultiConvo{
+func NewConn(opts Opts) *Conn {
+	return &Conn{
 		messenger:  opts.Messenger,
 		seq:        &LockedSequence{},
 		isWorker:   opts.Worker,
@@ -59,7 +59,7 @@ func NewMultiConvo(opts MultiConvoOpts) *MultiConvo {
 	}
 }
 
-func (mc *MultiConvo) nextSeq() uint32 {
+func (mc *Conn) nextSeq() uint32 {
 	s := mc.seq.Next() << 1
 	if !mc.isWorker {
 		s = s | 0x1
@@ -67,40 +67,40 @@ func (mc *MultiConvo) nextSeq() uint32 {
 	return s
 }
 
-func (mc *MultiConvo) Sequence() uint32 {
+func (mc *Conn) Sequence() uint32 {
 	return mc.seq.Current()
 }
 
 // Called by ReceiveMessage() to update the sequence number
 // when a new message has been received
-func (mc *MultiConvo) updateSeq(new uint32) {
+func (mc *Conn) updateSeq(new uint32) {
 	new = new >> 1
 	mc.seq.Update(new + 1)
 }
 
-func (mc *MultiConvo) xmit(m Message) error {
+func (mc *Conn) xmit(m Message) error {
 	return mc.messenger.Send(m)
 }
 
-func (mc *MultiConvo) xmitWithSeq(m Message) (seq uint32, err error) {
+func (mc *Conn) xmitWithSeq(m Message) (seq uint32, err error) {
 	seq = mc.nextSeq()
 	m.Seq = seq
 	err = mc.xmit(m)
 	return
 }
 
-func (mc *MultiConvo) Close() {
+func (mc *Conn) Close() {
 }
 
-func (mc *MultiConvo) OnMessage(mt MType, h MessageHandler) {
+func (mc *Conn) OnMessage(mt MType, h MessageHandler) {
 	mc.handlers[uint8(mt)] = h
 }
 
-func (mc *MultiConvo) OnMessageFunc(mt MType, f MessageHandlerFunc) {
+func (mc *Conn) OnMessageFunc(mt MType, f MessageHandlerFunc) {
 	mc.OnMessage(mt, f)
 }
 
-func (mc *MultiConvo) incomingLoop(ctx context.Context, msgCh chan<- Message, errorCh chan<- reply) {
+func (mc *Conn) incomingLoop(ctx context.Context, msgCh chan<- Message, errorCh chan<- reply) {
 	defer close(msgCh)
 	defer func() {
 		if r := recover(); r != nil {
@@ -159,7 +159,7 @@ func (mc *MultiConvo) incomingLoop(ctx context.Context, msgCh chan<- Message, er
 	}
 }
 
-func (mc *MultiConvo) dispatchMessage(m Message) error {
+func (mc *Conn) dispatchMessage(m Message) error {
 	t := m.Type
 	h := mc.handlers[uint8(t)]
 	if h == nil {
@@ -192,7 +192,7 @@ func (mc *MultiConvo) dispatchMessage(m Message) error {
 	return mc.xmit(resp)
 }
 
-func (mc *MultiConvo) ConversationLoop(ctx context.Context) error {
+func (mc *Conn) ConversationLoop(ctx context.Context) error {
 	var (
 		outgoingCh chan outgoingMessage
 
@@ -293,7 +293,7 @@ recv_loop:
 	return nil
 }
 
-func (mc *MultiConvo) sendMessage(ctx context.Context, mt MType, data interface{}) (Message, error) {
+func (mc *Conn) sendMessage(ctx context.Context, mt MType, data interface{}) (Message, error) {
 	m := Message{Type: mt, Data: data}
 	replyCh := make(chan reply)
 	mc.outgoingCh <- outgoingMessage{M: m, R: replyCh}
@@ -307,23 +307,23 @@ func (mc *MultiConvo) sendMessage(ctx context.Context, mt MType, data interface{
 	}
 }
 
-func (mc *MultiConvo) SendJob(ctx context.Context, job []fuq.Task) (Message, error) {
+func (mc *Conn) SendJob(ctx context.Context, job []fuq.Task) (Message, error) {
 	return mc.sendMessage(ctx, MTypeJob, &job)
 }
 
-func (mc *MultiConvo) SendUpdate(ctx context.Context, update fuq.JobStatusUpdate) (Message, error) {
+func (mc *Conn) SendUpdate(ctx context.Context, update fuq.JobStatusUpdate) (Message, error) {
 	return mc.sendMessage(ctx, MTypeUpdate, &update)
 }
 
-func (mc *MultiConvo) SendStop(ctx context.Context, nproc uint32) (Message, error) {
+func (mc *Conn) SendStop(ctx context.Context, nproc uint32) (Message, error) {
 	return mc.sendMessage(ctx, MTypeStop, nproc)
 }
 
-func (mc *MultiConvo) SendStopImmed(ctx context.Context) error {
+func (mc *Conn) SendStopImmed(ctx context.Context) error {
 	_, err := mc.sendMessage(ctx, MTypeStop, StopImmed)
 	return err
 }
 
-func (mc *MultiConvo) SendHello(ctx context.Context, hello HelloData) (Message, error) {
+func (mc *Conn) SendHello(ctx context.Context, hello HelloData) (Message, error) {
 	return mc.sendMessage(ctx, MTypeHello, &hello)
 }

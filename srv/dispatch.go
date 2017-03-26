@@ -69,7 +69,7 @@ type Dispatch struct {
 	Logger        *log.Logger
 	Queuer        channelQueuer
 	Messenger     proto.Messenger // proto.WebsocketMessenger
-	M             *proto.MultiConvo
+	M             *proto.Conn
 	DefaultLogDir string
 }
 
@@ -81,13 +81,13 @@ func NewDispatch(cfg DispatchConfig) *Dispatch {
 		DefaultLogDir: cfg.DefaultLogDir,
 	}
 
-	mopts := proto.MultiConvoOpts{
+	mopts := proto.Opts{
 		Messenger: cfg.Messenger,
 		Flusher:   proto.NopFlusher{},
 		Worker:    true,
 	}
 
-	d.M = proto.NewMultiConvo(mopts)
+	d.M = proto.NewConn(mopts)
 
 	d.M.OnMessageFunc(proto.MTypeJob, d.onJob)
 	d.M.OnMessageFunc(proto.MTypeStop, d.onStop)

@@ -98,10 +98,10 @@ func (dts *dispatcherTestState) Close() {
 	}
 }
 
-func (dts *dispatcherTestState) startServer() (*proto.MultiConvo, chan proto.Message, chan struct{}) {
+func (dts *dispatcherTestState) startServer() (*proto.Conn, chan proto.Message, chan struct{}) {
 	d, ctx := dts.dispatcher, dts.ctx
 
-	server := proto.NewMultiConvo(proto.MultiConvoOpts{
+	server := proto.NewConn(proto.Opts{
 		Messenger: websocket.Messenger{
 			C:       dts.socketPair.SConn,
 			Timeout: 1 * time.Second,

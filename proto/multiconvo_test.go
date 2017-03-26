@@ -19,9 +19,9 @@ import (
 	// "log"
 )
 
-type convoTestRigger interface {
-	MCW() *proto.MultiConvo
-	MCF() *proto.MultiConvo
+type connTestRigger interface {
+	MCW() *proto.Conn
+	MCF() *proto.Conn
 
 	SyncCh() chan struct{}
 	NilSyncCh()
@@ -31,9 +31,9 @@ type convoTestRigger interface {
 	Close()
 }
 
-type testRigMaker func() convoTestRigger
+type testRigMaker func() connTestRigger
 
-func testWithRig(mk testRigMaker, testFunc func(convoTestRigger, *testing.T)) func(*testing.T) {
+func testWithRig(mk testRigMaker, testFunc func(connTestRigger, *testing.T)) func(*testing.T) {
 	return func(t *testing.T) {
 		rig := mk()
 		defer rig.Close()
@@ -42,9 +42,9 @@ func testWithRig(mk testRigMaker, testFunc func(convoTestRigger, *testing.T)) fu
 	}
 }
 
-type testConvo struct {
+type testConn struct {
 	pworker, pforeman net.Conn
-	mcw1, mcf1        *proto.MultiConvo
+	mcw1, mcf1        *proto.Conn
 
 	ctx        context.Context
 	cancelFunc context.CancelFunc
@@ -52,34 +52,34 @@ type testConvo struct {
 	syncCh1 chan struct{}
 }
 
-func (tc *testConvo) MCW() *proto.MultiConvo {
+func (tc *testConn) MCW() *proto.Conn {
 	return tc.mcw1
 }
 
-func (tc *testConvo) MCF() *proto.MultiConvo {
+func (tc *testConn) MCF() *proto.Conn {
 	return tc.mcf1
 }
 
-func (tc *testConvo) SyncCh() chan struct{} {
+func (tc *testConn) SyncCh() chan struct{} {
 	return tc.syncCh1
 }
 
-func (tc *testConvo) NilSyncCh() {
+func (tc *testConn) NilSyncCh() {
 	tc.syncCh1 = nil
 }
 
-func (tc *testConvo) Context() context.Context {
+func (tc *testConn) Context() context.Context {
 	return tc.ctx
 }
 
-func newTestConvo() testConvo {
-	tc := testConvo{}
+func newTestConn() testConn {
+	tc := testConn{}
 
 	tc.pworker, tc.pforeman = net.Pipe()
 
 	tc.ctx, tc.cancelFunc = context.WithCancel(context.Background())
 
-	tc.mcw1 = proto.NewMultiConvo(proto.MultiConvoOpts{
+	tc.mcw1 = proto.NewConn(proto.Opts{
 		Messenger: proto.ConnMessenger{
 			Conn:    tc.pworker,
 			Flusher: proto.NopFlusher{},
@@ -87,7 +87,7 @@ func newTestConvo() testConvo {
 		Worker: true,
 	})
 
-	tc.mcf1 = proto.NewMultiConvo(proto.MultiConvoOpts{
+	tc.mcf1 = proto.NewConn(proto.Opts{
 		Messenger: proto.ConnMessenger{
 			Conn:    tc.pforeman,
 			Flusher: proto.NopFlusher{},
@@ -100,15 +100,15 @@ func newTestConvo() testConvo {
 	return tc
 }
 
-type wsConvo struct {
+type wsConn struct {
 	pair       *fuqtest.WSPair
-	mcw, mcf   *proto.MultiConvo
+	mcw, mcf   *proto.Conn
 	ctx        context.Context
 	cancelFunc context.CancelFunc
 	syncCh     chan struct{}
 }
 
-func (wsc *wsConvo) Close() {
+func (wsc *wsConn) Close() {
 	wsc.cancelFunc()
 	wsc.mcf.Close()
 	wsc.mcw.Close()
@@ -118,28 +118,28 @@ func (wsc *wsConvo) Close() {
 	wsc.pair.Close()
 }
 
-func (wsc *wsConvo) MCW() *proto.MultiConvo {
+func (wsc *wsConn) MCW() *proto.Conn {
 	return wsc.mcw
 }
 
-func (wsc *wsConvo) MCF() *proto.MultiConvo {
+func (wsc *wsConn) MCF() *proto.Conn {
 	return wsc.mcf
 }
 
-func (wsc *wsConvo) SyncCh() chan struct{} {
+func (wsc *wsConn) SyncCh() chan struct{} {
 	return wsc.syncCh
 }
 
-func (wsc *wsConvo) NilSyncCh() {
+func (wsc *wsConn) NilSyncCh() {
 	wsc.syncCh = nil
 }
 
-func (wsc *wsConvo) Context() context.Context {
+func (wsc *wsConn) Context() context.Context {
 	return wsc.ctx
 }
 
-func newWebSocketConvo() *wsConvo {
-	wsc := wsConvo{}
+func newWebSocketConn() *wsConn {
+	wsc := wsConn{}
 	defer func() {
 		r := recover()
 		if r == nil {
@@ -159,7 +159,7 @@ func newWebSocketConvo() *wsConvo {
 
 	wsc.ctx, wsc.cancelFunc = context.WithCancel(context.Background())
 
-	wsc.mcw = proto.NewMultiConvo(proto.MultiConvoOpts{
+	wsc.mcw = proto.NewConn(proto.Opts{
 		Messenger: websocket.Messenger{
 			C:       wsc.pair.CConn,
 			Timeout: 60 * time.Second,
@@ -167,7 +167,7 @@ func newWebSocketConvo() *wsConvo {
 		Worker: true,
 	})
 
-	wsc.mcf = proto.NewMultiConvo(proto.MultiConvoOpts{
+	wsc.mcf = proto.NewConn(proto.Opts{
 		Messenger: websocket.Messenger{
 			C:       wsc.pair.SConn,
 			Timeout: 60 * time.Second,
@@ -215,7 +215,7 @@ func callCloseIfNonNil(cl io.Closer) {
 	}
 }
 
-func (t *testConvo) Close() {
+func (t *testConn) Close() {
 	// first shut down Done channels
 	t.cancelFunc()
 	t.mcf1.Close()
@@ -254,21 +254,21 @@ func runTestsWithRig(mk testRigMaker, t *testing.T) {
 }
 
 func TestNetConn(t *testing.T) {
-	mk := func() convoTestRigger {
-		tc := newTestConvo()
+	mk := func() connTestRigger {
+		tc := newTestConn()
 		return &tc
 	}
 	runTestsWithRig(mk, t)
 }
 
 func TestWebSocket(t *testing.T) {
-	mk := func() convoTestRigger {
-		return newWebSocketConvo()
+	mk := func() connTestRigger {
+		return newWebSocketConn()
 	}
 	runTestsWithRig(mk, t)
 }
 
-func OnMessageTest(tc convoTestRigger, t *testing.T) {
+func OnMessageTest(tc connTestRigger, t *testing.T) {
 	syncCh, mcw, mcf := tc.SyncCh(), tc.MCW(), tc.MCF()
 	received := proto.Message{}
 
@@ -325,7 +325,7 @@ func checkOK(t *testing.T, m proto.Message, nproc0, nrun0 uint16) {
 	}
 }
 
-func SendJobTest(tc convoTestRigger, t *testing.T) {
+func SendJobTest(tc connTestRigger, t *testing.T) {
 	syncCh, mcw, mcf := tc.SyncCh(), tc.MCW(), tc.MCF()
 	received := proto.Message{}
 
@@ -378,7 +378,7 @@ func SendJobTest(tc convoTestRigger, t *testing.T) {
 	checkOK(t, repl, 17, 5)
 }
 
-func SendUpdateTest(tc convoTestRigger, t *testing.T) {
+func SendUpdateTest(tc connTestRigger, t *testing.T) {
 	syncCh, mcw, mcf := tc.SyncCh(), tc.MCW(), tc.MCF()
 	received := proto.Message{}
 
@@ -424,7 +424,7 @@ func SendUpdateTest(tc convoTestRigger, t *testing.T) {
 	checkOK(t, resp, 12, 3)
 }
 
-func SendStopTest(tc convoTestRigger, t *testing.T) {
+func SendStopTest(tc connTestRigger, t *testing.T) {
 	syncCh, mcw, mcf := tc.SyncCh(), tc.MCW(), tc.MCF()
 	received := proto.Message{}
 
@@ -459,7 +459,7 @@ func SendStopTest(tc convoTestRigger, t *testing.T) {
 	checkOK(t, resp, 4, 3)
 }
 
-func SendHelloTest(tc convoTestRigger, t *testing.T) {
+func SendHelloTest(tc connTestRigger, t *testing.T) {
 	syncCh, mcw, mcf := tc.SyncCh(), tc.MCW(), tc.MCF()
 	received := proto.Message{}
 
@@ -500,7 +500,7 @@ func SendHelloTest(tc convoTestRigger, t *testing.T) {
 	checkOK(t, resp, 4, 3)
 }
 
-func SecondSendBlocksUntilReplyTest(tc convoTestRigger, t *testing.T) {
+func SecondSendBlocksUntilReplyTest(tc connTestRigger, t *testing.T) {
 	var (
 		order     = make(chan int, 4)
 		recvSync  = make(chan struct{})
@@ -598,7 +598,7 @@ func SecondSendBlocksUntilReplyTest(tc convoTestRigger, t *testing.T) {
 	}
 }
 
-func HoldMessageUntilReplyTest(tc convoTestRigger, t *testing.T) {
+func HoldMessageUntilReplyTest(tc connTestRigger, t *testing.T) {
 	var (
 		order       = make(chan int, 4)
 		sendWait    = make(chan struct{})
@@ -715,7 +715,7 @@ func HoldMessageUntilReplyTest(tc convoTestRigger, t *testing.T) {
 		r1, r2, r3, r4)
 }
 
-func SequencesAreIncreasingTest(tc convoTestRigger, t *testing.T) {
+func SequencesAreIncreasingTest(tc connTestRigger, t *testing.T) {
 	type seqTuple struct {
 		wh  int
 		seq uint32
