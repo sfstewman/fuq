@@ -283,11 +283,11 @@ func OnMessageTest(tc convoTestRigger, t *testing.T) {
 	job := fuq.Task{Task: 23, JobDescription: fuq.JobDescription{JobId: fuq.JobId(7)}}
 
 	msg, err := mcf.SendJob(ctx, []fuq.Task{job})
-	rnp, rnr, err := msg.AsOkay()
 	if err != nil {
-		t.Fatalf("error decoding OK return: %v", err)
+		t.Fatalf("error sending job: %v", err)
 	}
 
+	rnp, rnr := msg.AsOkay()
 	if rnp != 17 || rnr != 5 {
 		t.Errorf("expected reply of OK(17|5) but received OK(%d|%d)", rnp, rnr)
 	}
@@ -316,11 +316,7 @@ func OnMessageTest(tc convoTestRigger, t *testing.T) {
 }
 
 func checkOK(t *testing.T, m Message, nproc0, nrun0 uint16) {
-	nproc, nrun, err := m.AsOkay()
-	if err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-
+	nproc, nrun := m.AsOkay()
 	if nproc != nproc0 || nrun != nrun0 {
 		t.Errorf("expected OK(%d|%d), but received OK(%d|%d)",
 			nproc0, nrun0, nproc, nrun)

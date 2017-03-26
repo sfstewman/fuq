@@ -33,40 +33,31 @@ func (m Message) IsStopImmed() bool {
 	return m.Data.(uint32) == StopImmed
 }
 
-func (m Message) AsStop() (nproc uint32, err error) {
+func (m Message) AsStop() uint32 {
 	if m.Type != MTypeStop {
-		err = fmt.Errorf("error decoding message, type is %s, not %s",
-			m.Type, MTypeStop)
-		return
+		panic("error decoding: message is not STOP")
 	}
 
-	arg0, ok := m.Data.(uint32)
-	if !ok {
-		err = fmt.Errorf("error decoding message, data is %T, not uint32",
-			m.Data)
-		return
+	return m.Data.(uint32)
+}
+
+func (m Message) AsOkay() (nproc, nrun uint16) {
+	if m.Type != MTypeOK {
+		panic("error decoding: message is not OK")
 	}
 
-	nproc = arg0
+	arg0 := m.Data.(uint32)
+	nproc, nrun = U32ToNProcs(arg0)
 	return
 }
 
-func (m Message) AsOkay() (nproc, nrun uint16, err error) {
-	if m.Type != MTypeOK {
-		err = fmt.Errorf("error decoding message, type is %s, not %s",
-			m.Type, MTypeOK)
-		return
+func (m Message) AsError() (MError, uint32) {
+	if m.Type != MTypeError {
+		panic("error decoding: message is not an error")
 	}
 
-	arg0, ok := m.Data.(uint32)
-	if !ok {
-		err = fmt.Errorf("error decoding message, data is %T, not uint32",
-			m.Data)
-		return
-	}
-
-	nproc, nrun = U32ToNProcs(arg0)
-	return
+	errData := m.Data.(mtErrorData)
+	return errData.Errcode, errData.Arg0
 }
 
 // func arg0Okay(arg0 uint32) (nproc, nrun uint16) {
@@ -91,9 +82,9 @@ func OkayMessage(nproc, nrun uint16, seq uint32) Message {
 
 func ErrorMessage(errcode MError, arg0 uint32, seq uint32) Message {
 	return Message{
-		Type: MTypeOK,
+		Type: MTypeError,
 		Seq:  seq,
-		Data: arg0,
+		Data: mtErrorData{errcode, arg0},
 	}
 }
 
