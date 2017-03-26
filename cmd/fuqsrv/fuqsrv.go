@@ -13,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/sfstewman/fuq"
+	"github.com/sfstewman/fuq/node"
 	"github.com/sfstewman/fuq/srv"
 	"log"
 	"os"
@@ -44,7 +45,7 @@ func startWorkers(wcfg *srv.NodeConfig, nproc int, config fuq.Config, wg *sync.W
 		return fmt.Errorf("error obtaining cookies: %v", err)
 	}
 
-	workerCtx := srv.WorkerContext(context.Background())
+	workerCtx := node.WorkerContext(context.Background())
 
 	for i := 0; i < nproc; i++ {
 		log.Printf("Starting worker %d", i+1)
@@ -73,7 +74,7 @@ func startWorkers(wcfg *srv.NodeConfig, nproc int, config fuq.Config, wg *sync.W
 				Logger:   logger,
 			}
 
-			w := srv.Worker{
+			w := node.Worker{
 				Seq:           seq,
 				Queuer:        q,
 				DefaultLogDir: logDir,

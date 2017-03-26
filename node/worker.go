@@ -1,4 +1,4 @@
-package srv
+package node
 
 import (
 	"context"
@@ -13,6 +13,11 @@ const (
 )
 
 var ErrStopCond = errors.New("stop condition")
+
+type Queuer interface {
+	RequestAction(ctx context.Context, nproc int) (WorkerAction, error)
+	UpdateAndRequestAction(ctx context.Context, status fuq.JobStatusUpdate, nproc int) (WorkerAction, error)
+}
 
 type Stopper interface {
 	IsStopped() bool

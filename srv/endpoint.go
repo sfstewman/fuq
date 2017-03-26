@@ -5,16 +5,12 @@ import (
 	"log"
 
 	"github.com/sfstewman/fuq"
+	"github.com/sfstewman/fuq/node"
 )
 
 const (
 	MaxRefreshTries = 5
 )
-
-type Queuer interface {
-	RequestAction(ctx context.Context, nproc int) (WorkerAction, error)
-	UpdateAndRequestAction(ctx context.Context, status fuq.JobStatusUpdate, nproc int) (WorkerAction, error)
-}
 
 type Endpoint struct {
 	*fuq.Endpoint
@@ -30,7 +26,7 @@ func (ep *Endpoint) RefreshCookie(oldCookie fuq.Cookie) error {
 	return ep.Config.RefreshCookie(ep.Endpoint, oldCookie)
 }
 
-func (w *Endpoint) RequestAction(ctx context.Context, nproc int) (WorkerAction, error) {
+func (w *Endpoint) RequestAction(ctx context.Context, nproc int) (node.WorkerAction, error) {
 	cookie := w.Cookie()
 
 	req := NodeRequestEnvelope{
@@ -67,22 +63,22 @@ retry:
 	}
 
 	if len(ret) == 0 {
-		return WaitAction{}, nil
+		return node.WaitAction{}, nil
 	}
 
 	// FIXME: this is a hack.
 	if ret[0].Task < 0 && ret[0].JobDescription.JobId == 0 && ret[0].JobDescription.Name == "::stop::" {
 		w.Log("received node stop request: %v", ret)
-		return StopAction{All: true}, nil
+		return node.StopAction{All: true}, nil
 	}
 
 	w.Log("received job request: %v", ret)
 
-	act := RunAction(ret[0])
+	act := node.RunAction(ret[0])
 	return act, nil
 }
 
-func (w *Endpoint) UpdateAndRequestAction(ctx context.Context, status fuq.JobStatusUpdate, nproc int) (WorkerAction, error) {
+func (w *Endpoint) UpdateAndRequestAction(ctx context.Context, status fuq.JobStatusUpdate, nproc int) (node.WorkerAction, error) {
 	if nproc > 0 {
 		status.NewJob = &fuq.JobRequest{NumProc: nproc}
 	}
@@ -103,12 +99,12 @@ func (w *Endpoint) UpdateAndRequestAction(ctx context.Context, status fuq.JobSta
 	}
 
 	if len(ret) == 0 {
-		return WaitAction{}, nil
+		return node.WaitAction{}, nil
 	}
 
 	w.Log("received job request: %v", ret)
 
-	act := RunAction(ret[0])
+	act := node.RunAction(ret[0])
 	return act, nil
 }
 
