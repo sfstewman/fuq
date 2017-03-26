@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/sfstewman/fuq"
+	"log"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -90,21 +91,33 @@ func (w WaitAction) PickWaitTime() time.Duration {
 }
 
 type StopAction struct {
-	All bool
+	All      bool
+	WaitChan chan<- struct{}
 }
 
 func (s StopAction) Act(ctx context.Context, w *Worker) (*fuq.JobStatusUpdate, error) {
+	defer func(ch chan<- struct{}) {
+		if ch != nil {
+			log.Print("closing wait channel")
+			close(ch)
+		}
+	}(s.WaitChan)
+
 	if !s.All {
+		log.Print("STOP 1")
 		return nil, ErrStopCond
 	}
 
 	// stop all
+	log.Print("STOP ALL")
 	v := ctx.Value(stopAllKey{})
 	if v == nil {
+		log.Print("CANNOT STOP ALL: no stop key")
 		return nil, ErrStopCond
 	}
 
 	if stopFunc, ok := v.(context.CancelFunc); ok {
+		log.Print("STOP ALL: calling STOP func")
 		stopFunc()
 	}
 

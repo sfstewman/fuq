@@ -30,7 +30,7 @@ func (cq ChanQueuer) RequestAction(ctx context.Context, nproc int) (WorkerAction
 	}
 
 stop:
-	return StopAction{false}, nil
+	return StopAction{All: false}, nil
 }
 
 func (cq ChanQueuer) UpdateAndRequestAction(ctx context.Context, status fuq.JobStatusUpdate, nproc int) (WorkerAction, error) {
