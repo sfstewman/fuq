@@ -7,6 +7,14 @@ import (
 	// "fmt"
 )
 
+func checkOK(t *testing.T, m Message, nproc0, nrun0 uint16) {
+	nproc, nrun := m.AsOkay()
+	if nproc != nproc0 || nrun != nrun0 {
+		t.Errorf("expected OK(%d|%d), but received OK(%d|%d)",
+			nproc0, nrun0, nproc, nrun)
+	}
+}
+
 func TestOkayMessage(t *testing.T) {
 	buf := &bytes.Buffer{}
 

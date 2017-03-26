@@ -1,10 +1,12 @@
-package proto
+package proto_test
 
 import (
 	"context"
 	"fmt"
 	"github.com/sfstewman/fuq"
 	"github.com/sfstewman/fuq/fuqtest"
+	"github.com/sfstewman/fuq/srv/proto"
+	"github.com/sfstewman/fuq/websocket"
 	"io"
 	"io/ioutil"
 	"net"
@@ -18,8 +20,8 @@ import (
 )
 
 type convoTestRigger interface {
-	MCW() *MultiConvo
-	MCF() *MultiConvo
+	MCW() *proto.MultiConvo
+	MCF() *proto.MultiConvo
 
 	SyncCh() chan struct{}
 	NilSyncCh()
@@ -42,7 +44,7 @@ func testWithRig(mk testRigMaker, testFunc func(convoTestRigger, *testing.T)) fu
 
 type testConvo struct {
 	pworker, pforeman net.Conn
-	mcw1, mcf1        *MultiConvo
+	mcw1, mcf1        *proto.MultiConvo
 
 	ctx        context.Context
 	cancelFunc context.CancelFunc
@@ -50,11 +52,11 @@ type testConvo struct {
 	syncCh1 chan struct{}
 }
 
-func (tc *testConvo) MCW() *MultiConvo {
+func (tc *testConvo) MCW() *proto.MultiConvo {
 	return tc.mcw1
 }
 
-func (tc *testConvo) MCF() *MultiConvo {
+func (tc *testConvo) MCF() *proto.MultiConvo {
 	return tc.mcf1
 }
 
@@ -77,18 +79,18 @@ func newTestConvo() testConvo {
 
 	tc.ctx, tc.cancelFunc = context.WithCancel(context.Background())
 
-	tc.mcw1 = NewMultiConvo(MultiConvoOpts{
-		Messenger: ConnMessenger{
+	tc.mcw1 = proto.NewMultiConvo(proto.MultiConvoOpts{
+		Messenger: proto.ConnMessenger{
 			Conn:    tc.pworker,
-			Flusher: NopFlusher{},
+			Flusher: proto.NopFlusher{},
 		},
 		Worker: true,
 	})
 
-	tc.mcf1 = NewMultiConvo(MultiConvoOpts{
-		Messenger: ConnMessenger{
+	tc.mcf1 = proto.NewMultiConvo(proto.MultiConvoOpts{
+		Messenger: proto.ConnMessenger{
 			Conn:    tc.pforeman,
-			Flusher: NopFlusher{},
+			Flusher: proto.NopFlusher{},
 		},
 		Worker: false,
 	})
@@ -100,7 +102,7 @@ func newTestConvo() testConvo {
 
 type wsConvo struct {
 	pair       *fuqtest.WSPair
-	mcw, mcf   *MultiConvo
+	mcw, mcf   *proto.MultiConvo
 	ctx        context.Context
 	cancelFunc context.CancelFunc
 	syncCh     chan struct{}
@@ -116,11 +118,11 @@ func (wsc *wsConvo) Close() {
 	wsc.pair.Close()
 }
 
-func (wsc *wsConvo) MCW() *MultiConvo {
+func (wsc *wsConvo) MCW() *proto.MultiConvo {
 	return wsc.mcw
 }
 
-func (wsc *wsConvo) MCF() *MultiConvo {
+func (wsc *wsConvo) MCF() *proto.MultiConvo {
 	return wsc.mcf
 }
 
@@ -157,16 +159,16 @@ func newWebSocketConvo() *wsConvo {
 
 	wsc.ctx, wsc.cancelFunc = context.WithCancel(context.Background())
 
-	wsc.mcw = NewMultiConvo(MultiConvoOpts{
-		Messenger: WebsocketMessenger{
+	wsc.mcw = proto.NewMultiConvo(proto.MultiConvoOpts{
+		Messenger: websocket.Messenger{
 			C:       wsc.pair.CConn,
 			Timeout: 60 * time.Second,
 		},
 		Worker: true,
 	})
 
-	wsc.mcf = NewMultiConvo(MultiConvoOpts{
-		Messenger: WebsocketMessenger{
+	wsc.mcf = proto.NewMultiConvo(proto.MultiConvoOpts{
+		Messenger: websocket.Messenger{
 			C:       wsc.pair.SConn,
 			Timeout: 60 * time.Second,
 		},
@@ -268,12 +270,12 @@ func TestWebSocket(t *testing.T) {
 
 func OnMessageTest(tc convoTestRigger, t *testing.T) {
 	syncCh, mcw, mcf := tc.SyncCh(), tc.MCW(), tc.MCF()
-	received := Message{}
+	received := proto.Message{}
 
-	mcw.OnMessageFunc(MTypeJob, func(msg Message) Message {
+	mcw.OnMessageFunc(proto.MTypeJob, func(msg proto.Message) proto.Message {
 		received = msg
 		close(syncCh)
-		return OkayMessage(17, 5, msg.Seq)
+		return proto.OkayMessage(17, 5, msg.Seq)
 	})
 
 	ctx := tc.Context()
@@ -296,7 +298,7 @@ func OnMessageTest(tc convoTestRigger, t *testing.T) {
 	<-syncCh
 	tc.NilSyncCh()
 
-	if received.Type != MTypeJob {
+	if received.Type != proto.MTypeJob {
 		t.Errorf("wrong job type, expected JOB, found %d", received.Type)
 	}
 
@@ -315,7 +317,7 @@ func OnMessageTest(tc convoTestRigger, t *testing.T) {
 	}
 }
 
-func checkOK(t *testing.T, m Message, nproc0, nrun0 uint16) {
+func checkOK(t *testing.T, m proto.Message, nproc0, nrun0 uint16) {
 	nproc, nrun := m.AsOkay()
 	if nproc != nproc0 || nrun != nrun0 {
 		t.Errorf("expected OK(%d|%d), but received OK(%d|%d)",
@@ -325,15 +327,15 @@ func checkOK(t *testing.T, m Message, nproc0, nrun0 uint16) {
 
 func SendJobTest(tc convoTestRigger, t *testing.T) {
 	syncCh, mcw, mcf := tc.SyncCh(), tc.MCW(), tc.MCF()
-	received := Message{}
+	received := proto.Message{}
 
 	// mcf.flusher = fl
 
-	mcw.OnMessageFunc(MTypeJob, func(msg Message) Message {
+	mcw.OnMessageFunc(proto.MTypeJob, func(msg proto.Message) proto.Message {
 		received = msg
 		tc.NilSyncCh()
 		close(syncCh)
-		return OkayMessage(17, 5, msg.Seq)
+		return proto.OkayMessage(17, 5, msg.Seq)
 	})
 
 	ctx := tc.Context()
@@ -360,7 +362,7 @@ func SendJobTest(tc convoTestRigger, t *testing.T) {
 		t.Fatalf("error sending JOB: %v", err)
 	}
 
-	if received.Type != MTypeJob {
+	if received.Type != proto.MTypeJob {
 		t.Fatalf("expected job message")
 	}
 
@@ -378,13 +380,13 @@ func SendJobTest(tc convoTestRigger, t *testing.T) {
 
 func SendUpdateTest(tc convoTestRigger, t *testing.T) {
 	syncCh, mcw, mcf := tc.SyncCh(), tc.MCW(), tc.MCF()
-	received := Message{}
+	received := proto.Message{}
 
-	mcf.OnMessageFunc(MTypeUpdate, func(msg Message) Message {
+	mcf.OnMessageFunc(proto.MTypeUpdate, func(msg proto.Message) proto.Message {
 		received = msg
 		tc.NilSyncCh()
 		close(syncCh)
-		return OkayMessage(12, 3, msg.Seq)
+		return proto.OkayMessage(12, 3, msg.Seq)
 	})
 
 	ctx := tc.Context()
@@ -406,7 +408,7 @@ func SendUpdateTest(tc convoTestRigger, t *testing.T) {
 	// channel sync: make sure received is set
 	<-syncCh
 
-	if received.Type != MTypeUpdate {
+	if received.Type != proto.MTypeUpdate {
 		t.Fatalf("expected job update message")
 	}
 
@@ -424,13 +426,13 @@ func SendUpdateTest(tc convoTestRigger, t *testing.T) {
 
 func SendStopTest(tc convoTestRigger, t *testing.T) {
 	syncCh, mcw, mcf := tc.SyncCh(), tc.MCW(), tc.MCF()
-	received := Message{}
+	received := proto.Message{}
 
-	mcw.OnMessageFunc(MTypeStop, func(msg Message) Message {
+	mcw.OnMessageFunc(proto.MTypeStop, func(msg proto.Message) proto.Message {
 		received = msg
 		tc.NilSyncCh()
 		close(syncCh)
-		return OkayMessage(4, 3, msg.Seq)
+		return proto.OkayMessage(4, 3, msg.Seq)
 	})
 
 	ctx := tc.Context()
@@ -445,15 +447,11 @@ func SendStopTest(tc convoTestRigger, t *testing.T) {
 	// channel sync: make sure received is set
 	<-syncCh
 
-	if received.Type != MTypeStop {
+	if received.Type != proto.MTypeStop {
 		t.Fatalf("expected stop message")
 	}
 
-	nstop, err := received.AsStop()
-	if err != nil {
-		t.Fatalf("error decoding stop data: %#v", err)
-	}
-
+	nstop := received.AsStop()
 	if nstop != 3 {
 		t.Errorf("STOP received, but nproc = %d, expected %d", nstop, 3)
 	}
@@ -463,20 +461,20 @@ func SendStopTest(tc convoTestRigger, t *testing.T) {
 
 func SendHelloTest(tc convoTestRigger, t *testing.T) {
 	syncCh, mcw, mcf := tc.SyncCh(), tc.MCW(), tc.MCF()
-	received := Message{}
+	received := proto.Message{}
 
-	mcf.OnMessageFunc(MTypeHello, func(msg Message) Message {
+	mcf.OnMessageFunc(proto.MTypeHello, func(msg proto.Message) proto.Message {
 		received = msg
 		tc.NilSyncCh()
 		close(syncCh)
-		return OkayMessage(4, 3, msg.Seq)
+		return proto.OkayMessage(4, 3, msg.Seq)
 	})
 
 	ctx := tc.Context()
 	goPanicOnError(ctx, mcw.ConversationLoop)
 	goPanicOnError(ctx, mcf.ConversationLoop)
 
-	hello := HelloData{NumProcs: 11}
+	hello := proto.HelloData{NumProcs: 11}
 	resp, err := mcw.SendHello(ctx, hello)
 	if err != nil {
 		t.Fatalf("error sending STOP(3): %v", err)
@@ -486,11 +484,11 @@ func SendHelloTest(tc convoTestRigger, t *testing.T) {
 	// channel sync: make sure received is set
 	<-syncCh
 
-	if received.Type != MTypeHello {
+	if received.Type != proto.MTypeHello {
 		t.Fatalf("expected stop message")
 	}
 
-	hrecvPtr, ok := received.Data.(*HelloData)
+	hrecvPtr, ok := received.Data.(*proto.HelloData)
 	if !ok {
 		t.Fatalf("expected hello data, but found: %#v", received.Data)
 	}
@@ -513,14 +511,14 @@ func SecondSendBlocksUntilReplyTest(tc convoTestRigger, t *testing.T) {
 
 	mcw, mcf := tc.MCW(), tc.MCF()
 
-	mcw.OnMessageFunc(MTypeJob, func(msg Message) Message {
+	mcw.OnMessageFunc(proto.MTypeJob, func(msg proto.Message) proto.Message {
 		// log.Printf("RECEIVED: JOB")
 		data := msg.Data.(*[]fuq.Task)
 		close(recvSync) // signal that first message has been received
 
 		<-replWait
 		order <- (*data)[0].Task
-		return OkayMessage(17, 5, msg.Seq)
+		return proto.OkayMessage(17, 5, msg.Seq)
 	})
 
 	ctx := tc.Context()
@@ -611,7 +609,7 @@ func HoldMessageUntilReplyTest(tc convoTestRigger, t *testing.T) {
 
 	mcw, mcf := tc.MCW(), tc.MCF()
 
-	mcw.OnMessageFunc(MTypeJob, func(msg Message) Message {
+	mcw.OnMessageFunc(proto.MTypeJob, func(msg proto.Message) proto.Message {
 		order <- 3
 		// log.Printf("RECEIVED: JOB")
 
@@ -620,16 +618,16 @@ func HoldMessageUntilReplyTest(tc convoTestRigger, t *testing.T) {
 
 		// wait for signal to send reply
 		<-recvWait
-		return OkayMessage(17, 5, msg.Seq)
+		return proto.OkayMessage(17, 5, msg.Seq)
 	})
 
-	mcf.OnMessageFunc(MTypeUpdate, func(msg Message) Message {
+	mcf.OnMessageFunc(proto.MTypeUpdate, func(msg proto.Message) proto.Message {
 		// signal that second send has been received
 		close(recvSignal2)
 
 		order <- 4
 		// log.Printf("RECEIVED: UPDATE")
-		return OkayMessage(18, 4, msg.Seq)
+		return proto.OkayMessage(18, 4, msg.Seq)
 	})
 
 	ctx := tc.Context()
@@ -745,17 +743,17 @@ func SequencesAreIncreasingTest(tc convoTestRigger, t *testing.T) {
 		return s
 	}
 
-	mcw.OnMessageFunc(MTypeJob, func(msg Message) Message {
+	mcw.OnMessageFunc(proto.MTypeJob, func(msg proto.Message) proto.Message {
 		addSeq(1, msg.Seq)
 		// log.Printf("RECEIVED: JOB")
-		return OkayMessage(17, 5, msg.Seq)
+		return proto.OkayMessage(17, 5, msg.Seq)
 	})
 
-	mcf.OnMessageFunc(MTypeUpdate, func(msg Message) Message {
+	mcf.OnMessageFunc(proto.MTypeUpdate, func(msg proto.Message) proto.Message {
 		addSeq(2, msg.Seq)
 		// signal that second send has been received
 		// log.Printf("RECEIVED: UPDATE")
-		return OkayMessage(18, 4, msg.Seq)
+		return proto.OkayMessage(18, 4, msg.Seq)
 	})
 
 	ctx := tc.Context()

@@ -14,6 +14,7 @@ import (
 	"github.com/sfstewman/fuq"
 	"github.com/sfstewman/fuq/fuqtest"
 	"github.com/sfstewman/fuq/srv/proto"
+	"github.com/sfstewman/fuq/websocket"
 )
 
 type okayRunner struct {
@@ -45,7 +46,7 @@ type dispatcherTestState struct {
 	cancelFunc context.CancelFunc
 
 	socketPair *fuqtest.WSPair
-	messenger  proto.WebsocketMessenger
+	messenger  websocket.Messenger
 
 	runner     Runner
 	dispatcher *Dispatch
@@ -70,7 +71,7 @@ func newDispatcherTestState(nw int, runner Runner) *dispatcherTestState {
 	dts.tmpDir = tmpDir
 	dts.ctx, dts.cancelFunc = context.WithCancel(context.Background())
 	dts.socketPair = fuqtest.NewWSPair(tmpDir)
-	dts.messenger = proto.WebsocketMessenger{
+	dts.messenger = websocket.Messenger{
 		C:       dts.socketPair.CConn,
 		Timeout: 1 * time.Second,
 	}
@@ -101,7 +102,7 @@ func (dts *dispatcherTestState) startServer() (*proto.MultiConvo, chan proto.Mes
 	d, ctx := dts.dispatcher, dts.ctx
 
 	server := proto.NewMultiConvo(proto.MultiConvoOpts{
-		Messenger: proto.WebsocketMessenger{
+		Messenger: websocket.Messenger{
 			C:       dts.socketPair.SConn,
 			Timeout: 1 * time.Second,
 		},
