@@ -4,12 +4,9 @@ import (
 	"context"
 	"fmt"
 	"github.com/sfstewman/fuq"
-	"github.com/sfstewman/fuq/srv/proto"
+	"github.com/sfstewman/fuq/proto"
 	"log"
 	"sync"
-	// "github.com/gorilla/websocket"
-	// "net/http"
-	// "time"
 )
 
 const MaxUint16 = int(^uint16(0))

@@ -3,7 +3,7 @@ package websocket
 import (
 	"fmt"
 	"github.com/gorilla/websocket"
-	"github.com/sfstewman/fuq/srv/proto"
+	"github.com/sfstewman/fuq/proto"
 	"time"
 )
 

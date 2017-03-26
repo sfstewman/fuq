@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"github.com/sfstewman/fuq"
 	"github.com/sfstewman/fuq/fuqtest"
-	"github.com/sfstewman/fuq/srv/proto"
+	"github.com/sfstewman/fuq/proto"
 	"github.com/sfstewman/fuq/websocket"
 	"io"
 	"io/ioutil"
