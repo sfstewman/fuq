@@ -13,11 +13,13 @@ import (
 
 type JobQueuer interface {
 	Close() error
+
 	ClearJobs() error
 	EachJob(func(fuq.JobDescription) error) error
 	FetchJobId(fuq.JobId) (fuq.JobDescription, error)
 	ChangeJobState(jobId fuq.JobId, newState fuq.JobStatus) (fuq.JobStatus, error)
 	AddJob(job fuq.JobDescription) (fuq.JobId, error)
+
 	UpdateTaskStatus(update fuq.JobStatusUpdate) error
 	FetchJobTaskStatus(jobId fuq.JobId) (fuq.JobTaskStatus, error)
 	FetchPendingTasks(nproc int) ([]fuq.Task, error)

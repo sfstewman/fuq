@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 )
 
@@ -211,10 +212,44 @@ type JobTaskData struct {
 	ErrorMessages []string
 }
 
+func (tasks *JobTaskData) Update(update JobStatusUpdate) error {
+	ind := sort.SearchInts(tasks.Running, update.Task)
+	if ind >= len(tasks.Running) || tasks.Running[ind] != update.Task {
+		return fmt.Errorf("task %d is not in the running list", update.Task)
+	}
+
+	copy(tasks.Running[ind:], tasks.Running[ind+1:])
+	tasks.Running = tasks.Running[:len(tasks.Running)-1]
+
+	if update.Success {
+		tasks.Finished = append(tasks.Finished, update.Task)
+	} else {
+		tasks.Errors = append(tasks.Errors, update.Task)
+		tasks.ErrorMessages = append(tasks.ErrorMessages, update.Status)
+	}
+
+	return nil
+}
+
 type JobStatusUpdate struct {
 	JobId   JobId       `json:"job_id"`
 	Task    int         `json:"task"`
 	Success bool        `json:"success"`
 	Status  string      `json:"status"`
 	NewJob  *JobRequest `json:"newjob"`
+}
+
+func MakeJobStatusUpdate(desc JobDescription, tasks JobTaskData) JobTaskStatus {
+	status := JobTaskStatus{
+		Description:     desc,
+		TasksFinished:   len(tasks.Finished),
+		TasksPending:    len(tasks.Pending),
+		TasksRunning:    make([]int, len(tasks.Running)),
+		TasksWithErrors: make([]int, len(tasks.Errors)),
+	}
+
+	copy(status.TasksRunning, tasks.Running)
+	copy(status.TasksWithErrors, tasks.Errors)
+
+	return status
 }

@@ -10,7 +10,6 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/vmihailenco/msgpack.v2"
 	"log"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -601,24 +600,12 @@ func (d *JobStore) UpdateTaskStatus(update fuq.JobStatusUpdate) error {
 		numRunning := -1
 		numPending := -1
 		err := d.updateJobTasksInTx(tx, update.JobId, func(tasks *fuq.JobTaskData) error {
-			ind := sort.SearchInts(tasks.Running, update.Task)
-			if ind >= len(tasks.Running) || tasks.Running[ind] != update.Task {
-				return fmt.Errorf("task %d is not in the running list", update.Task)
+			if err := tasks.Update(update); err != nil {
+				return err
 			}
-
-			copy(tasks.Running[ind:], tasks.Running[ind+1:])
-			tasks.Running = tasks.Running[:len(tasks.Running)-1]
 
 			numRunning = len(tasks.Running)
 			numPending = len(tasks.Pending)
-
-			if update.Success {
-				tasks.Finished = append(tasks.Finished, update.Task)
-			} else {
-				tasks.Errors = append(tasks.Errors, update.Task)
-				tasks.ErrorMessages = append(tasks.ErrorMessages, update.Status)
-			}
-
 			return nil
 		})
 
@@ -729,20 +716,7 @@ func (d *JobStore) FetchJobTaskStatus(jobId fuq.JobId) (fuq.JobTaskStatus, error
 			return err
 		}
 
-		status.Description = desc
-		status.TasksFinished = len(taskData.Finished)
-		status.TasksPending = len(taskData.Pending)
-		status.TasksRunning = make([]int, len(taskData.Running))
-		status.TasksWithErrors = make([]int, len(taskData.Errors))
-
-		for i, task := range taskData.Running {
-			status.TasksRunning[i] = task
-		}
-
-		for i, task := range taskData.Errors {
-			status.TasksWithErrors[i] = task
-		}
-
+		status = fuq.MakeJobStatusUpdate(desc, *taskData)
 		return nil
 	})
 
