@@ -145,23 +145,39 @@ func (js JobStatus) MarshalJSON() ([]byte, error) {
 }
 
 func (js *JobStatus) UnmarshalJSON(b []byte) error {
-	s := string(b)
-	switch s {
-	case `waiting`, `"waiting"`:
-		*js = Waiting
-	case `running`, `"running"`:
-		*js = Running
-	case `finished`, `"finished"`:
-		*js = Finished
-	case `paused`, `"paused"`:
-		*js = Paused
-	case `cancelled`, `"cancelled"`:
-		*js = Cancelled
-	default:
-		return fmt.Errorf("unknown status '%s'", s)
+	var s string
+
+	n := len(b)
+	if n >= 2 && b[0] == '"' && b[n-1] == '"' {
+		s = string(b[1 : n-1])
+	} else {
+		s = string(b)
 	}
 
+	jsp, err := ParseJobStatus(s)
+	if err != nil {
+		return err
+	}
+
+	*js = jsp
 	return nil
+}
+
+func ParseJobStatus(s string) (JobStatus, error) {
+	switch s {
+	case "waiting":
+		return Waiting, nil
+	case "running":
+		return Running, nil
+	case "finished":
+		return Finished, nil
+	case "paused":
+		return Paused, nil
+	case "cancelled":
+		return Cancelled, nil
+	default:
+		return JobStatus(0), fmt.Errorf("unknown status '%s'", s)
+	}
 }
 
 func (js JobStatus) String() string {

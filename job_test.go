@@ -36,6 +36,45 @@ command /bin/echo	# another comment
 	strCmpTable.Check(t)
 }
 
+func checkParsedJobStatus(t *testing.T, s string, js JobStatus, expectOK bool) {
+	pjs, err := ParseJobStatus(s)
+
+	parseOK := (err == nil)
+	if parseOK != expectOK {
+		if expectOK {
+			t.Fatalf("error parsing '%s': %v", s, err)
+		} else {
+			t.Fatalf("expected error parsing '%s' but none found")
+		}
+	}
+
+	if !expectOK {
+		return
+	}
+
+	if pjs != js {
+		t.Errorf("parsed '%s' into JobStatus %v, but expect %v",
+			s, pjs, js)
+	}
+}
+
+func TestParseJobStatus(t *testing.T) {
+	checkParsedJobStatus(t, `waiting`, Waiting, true)
+	checkParsedJobStatus(t, `waitin`, Waiting, false)
+
+	checkParsedJobStatus(t, `running`, Running, true)
+	checkParsedJobStatus(t, `"running"`, Running, false)
+
+	checkParsedJobStatus(t, `finished`, Finished, true)
+	checkParsedJobStatus(t, `finish`, Finished, false)
+
+	checkParsedJobStatus(t, `paused`, Paused, true)
+	checkParsedJobStatus(t, `pause`, Paused, false)
+
+	checkParsedJobStatus(t, `cancelled`, Cancelled, true)
+	checkParsedJobStatus(t, `cancel`, Cancelled, false)
+}
+
 func TestJobStatusMarshalJSON(t *testing.T) {
 	inp := make(map[string]JobStatus)
 
