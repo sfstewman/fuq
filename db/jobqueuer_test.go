@@ -67,7 +67,7 @@ func addJobs(t *testing.T, jq srv.JobQueuer, jobs []fuq.JobDescription) ([]fuq.J
 func jqTestAddJob(t *testing.T, jq srv.JobQueuer) {
 	expectedJobs, revId := addJobs(t, jq, testJobs)
 	for _, job := range expectedJobs {
-		fetched, err := jq.FetchJobs(job.Name, "")
+		fetched, err := srv.FetchJobs(jq, job.Name, "")
 		if err != nil {
 			t.Fatalf("error fetching job '%s': %v", job.Name, err)
 		}
@@ -80,7 +80,7 @@ func jqTestAddJob(t *testing.T, jq srv.JobQueuer) {
 		compareJob(t, fetched[0], job)
 	}
 
-	fetched, err := jq.FetchJobs("", "")
+	fetched, err := srv.FetchJobs(jq, "", "")
 	if err != nil {
 		t.Fatalf("error fetching jobs: %v", err)
 	}
@@ -115,7 +115,7 @@ func jqTestChangeJobState(t *testing.T, jq srv.JobQueuer) {
 			fuq.Waiting, oldState)
 	}
 
-	fetched, err := jq.FetchJobs("", "")
+	fetched, err := srv.FetchJobs(jq, "", "")
 	if err != nil {
 		t.Fatalf("error fetching all jobs: %v", err)
 	}
@@ -144,12 +144,12 @@ func jqTestChangeJobState(t *testing.T, jq srv.JobQueuer) {
 		t.Errorf("did not fetch expected job %v", expectedJobs[0].JobId)
 	}
 
-	runningJobs, err := jq.FetchJobs("", "running")
+	runningJobs, err := srv.FetchJobs(jq, "", "running")
 	if err != nil {
 		t.Errorf("error fetching running jobs: %v", err)
 	}
 
-	waitingJobs, err := jq.FetchJobs("", "waiting")
+	waitingJobs, err := srv.FetchJobs(jq, "", "waiting")
 	if err != nil {
 		t.Errorf("error fetching waiting jobs: %v", err)
 	}

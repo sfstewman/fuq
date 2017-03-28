@@ -165,9 +165,7 @@ func fetchJob(jobBucket *bolt.Bucket, jobId fuq.JobId) (fuq.JobDescription, erro
 	return bytesToJob(raw)
 }
 
-func (d *JobStore) FetchJobs(name, status string) ([]fuq.JobDescription, error) {
-	var jobs []fuq.JobDescription
-
+func (d *JobStore) EachJob(fn func(fuq.JobDescription) error) error {
 	err := d.db.View(func(tx *bolt.Tx) error {
 		var jb *bolt.Bucket
 
@@ -197,43 +195,23 @@ func (d *JobStore) FetchJobs(name, status string) ([]fuq.JobDescription, error) 
 					k, err)
 			}
 
-			if name != "" && jobData.Name != name {
-				continue
-			}
-
-			if status != "" && jobData.Status.String() != status {
-				continue
-			}
-
-			if status == "" {
-				if jobData.Status == fuq.Cancelled {
-					continue
-				}
-				if jobData.Status == fuq.Finished {
-					continue
-				}
-			}
-
 			if jobData.JobId == 0 {
 				jobData.JobId = fuq.JobId(jobId)
 			}
 
-			jobs = append(jobs, jobData)
+			if err := fn(jobData); err != nil {
+				return err
+			}
 		}
 
 		return nil
 	})
 
 	if err != nil {
-		return nil, fmt.Errorf("error fetching jobs (name='%s',status='%s'): %v",
-			name, status, err)
+		return fmt.Errorf("error iterating over jobs: %v", err)
 	}
 
-	if jobs == nil {
-		jobs = make([]fuq.JobDescription, 0, 0)
-	}
-
-	return jobs, nil
+	return nil
 }
 
 func (js *JobStore) FetchJobId(jobId fuq.JobId) (fuq.JobDescription, error) {

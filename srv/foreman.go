@@ -14,7 +14,7 @@ import (
 type JobQueuer interface {
 	Close() error
 	ClearJobs() error
-	FetchJobs(name, status string) ([]fuq.JobDescription, error)
+	EachJob(func(fuq.JobDescription) error) error
 	FetchJobId(fuq.JobId) (fuq.JobDescription, error)
 	ChangeJobState(jobId fuq.JobId, newState fuq.JobStatus) (fuq.JobStatus, error)
 	AddJob(job fuq.JobDescription) (fuq.JobId, error)
@@ -23,8 +23,54 @@ type JobQueuer interface {
 	FetchPendingTasks(nproc int) ([]fuq.Task, error)
 }
 
+/* FetchJobs queries a JobQueuer for jobs that match either a name or a
+ * status or both.
+ *
+ * If both name and status are empty, FetchJobs returns all jobs that
+ * are not in the Cancelled or Finished state.
+ *
+ * If name is not empty, FetchJobs returns all jobs whose names exactly
+ * match name.
+ *
+ * If status is not empty, FetchJobs returns all jobs whose status
+ * exactly matches status.
+ *
+ * Thus, if name and status are both not empty, FetchJobs will return
+ * jobs matching both.
+ *
+ * Note that this is currently done via a full table scan over all jobs,
+ * but may be optimized in the future.
+ */
+func FetchJobs(q JobQueuer, name, status string) ([]fuq.JobDescription, error) {
+	var jobs []fuq.JobDescription
+
+	err := q.EachJob(func(desc fuq.JobDescription) error {
+		if name != "" && desc.Name != name {
+			return nil
+		}
+
+		if status != "" && desc.Status.String() != status {
+			return nil
+		}
+
+		if status == "" {
+			if desc.Status == fuq.Cancelled {
+				return nil
+			}
+			if desc.Status == fuq.Finished {
+				return nil
+			}
+		}
+
+		jobs = append(jobs, desc)
+		return nil
+	})
+
+	return jobs, err
+}
+
 func AllJobs(q JobQueuer) ([]fuq.JobDescription, error) {
-	return q.FetchJobs("", "")
+	return FetchJobs(q, "", "")
 }
 
 type AuthChecker interface {
@@ -409,7 +455,7 @@ func (f *Foreman) HandleClientJobList(resp http.ResponseWriter, req *http.Reques
 		}
 	}
 
-	jobs, err := f.FetchJobs(listReq.Name, listReq.Status)
+	jobs, err := FetchJobs(f, listReq.Name, listReq.Status)
 	if err != nil {
 		log.Printf("error retrieving job list: %v", err)
 		fuq.InternalError(resp, req)
