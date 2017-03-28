@@ -1,8 +1,10 @@
-package db
+package db_test
 
 import (
 	"fmt"
 	"github.com/boltdb/bolt"
+	"github.com/sfstewman/fuq/db"
+	"github.com/sfstewman/fuq/srv"
 	"io/ioutil"
 	"log"
 	"os"
@@ -37,11 +39,11 @@ func cleanupTestDB(db *bolt.DB) {
 	}
 }
 
-func runJobStoreTest(t *testing.T, name string, jsTest func(*testing.T, JobQueuer)) {
+func runJobStoreTest(t *testing.T, name string, jsTest func(*testing.T, srv.JobQueuer)) {
 	tmp := openTestDB()
 	defer cleanupTestDB(tmp)
 
-	js, err := newJobStore(tmp)
+	js, err := db.InitJobStore(tmp)
 	if err != nil {
 		log.Fatalf("error in creating job store: %v", err)
 	}

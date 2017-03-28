@@ -50,27 +50,9 @@ var statusBuckets map[fuq.JobStatus][]byte = map[fuq.JobStatus][]byte{
 	fuq.Cancelled: jobCancelledBucket,
 }
 
-type JobQueuer interface {
-	Close() error
-	ClearJobs() error
-	FetchJobs(name, status string) ([]fuq.JobDescription, error)
-	FetchJobId(fuq.JobId) (fuq.JobDescription, error)
-	ChangeJobState(jobId fuq.JobId, newState fuq.JobStatus) (fuq.JobStatus, error)
-	AddJob(job fuq.JobDescription) (fuq.JobId, error)
-	UpdateTaskStatus(update fuq.JobStatusUpdate) error
-	FetchJobTaskStatus(jobId fuq.JobId) (fuq.JobTaskStatus, error)
-	FetchPendingTasks(nproc int) ([]fuq.Task, error)
-}
-
-func AllJobs(q JobQueuer) ([]fuq.JobDescription, error) {
-	return q.FetchJobs("", "")
-}
-
 type JobStore struct {
 	db *bolt.DB
 }
-
-var _ JobQueuer = (*JobStore)(nil)
 
 func NewJobStore(dbpath string) (*JobStore, error) {
 	db, err := bolt.Open(dbpath, 0666, nil)
@@ -79,10 +61,10 @@ func NewJobStore(dbpath string) (*JobStore, error) {
 			dbpath, err)
 	}
 
-	return newJobStore(db)
+	return InitJobStore(db)
 }
 
-func newJobStore(db *bolt.DB) (*JobStore, error) {
+func InitJobStore(db *bolt.DB) (*JobStore, error) {
 	if err := db.Update(createJobsBucket); err != nil {
 		return nil, fmt.Errorf("error creating database scheme: %v", err)
 	}

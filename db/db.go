@@ -69,7 +69,7 @@ func NewStores(f Files) (st *Stores, err error) {
 	}
 
 	st.databases = append(st.databases, jobsDB)
-	st.Jobs, err = newJobStore(jobsDB)
+	st.Jobs, err = InitJobStore(jobsDB)
 	if err != nil {
 		return
 	}

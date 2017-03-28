@@ -1,8 +1,9 @@
-package db
+package db_test
 
 import (
 	"fmt"
 	"github.com/sfstewman/fuq"
+	"github.com/sfstewman/fuq/srv"
 	"testing"
 )
 
@@ -42,7 +43,7 @@ func compareJob(t *testing.T, actual, expected fuq.JobDescription) {
 	}
 }
 
-func addJobs(t *testing.T, jq JobQueuer, jobs []fuq.JobDescription) ([]fuq.JobDescription, map[fuq.JobId]int) {
+func addJobs(t *testing.T, jq srv.JobQueuer, jobs []fuq.JobDescription) ([]fuq.JobDescription, map[fuq.JobId]int) {
 	out := make([]fuq.JobDescription, len(jobs))
 	revId := make(map[fuq.JobId]int)
 	for i, j := range jobs {
@@ -63,7 +64,7 @@ func addJobs(t *testing.T, jq JobQueuer, jobs []fuq.JobDescription) ([]fuq.JobDe
 	return out, revId
 }
 
-func jqTestAddJob(t *testing.T, jq JobQueuer) {
+func jqTestAddJob(t *testing.T, jq srv.JobQueuer) {
 	expectedJobs, revId := addJobs(t, jq, testJobs)
 	for _, job := range expectedJobs {
 		fetched, err := jq.FetchJobs(job.Name, "")
@@ -101,7 +102,7 @@ func jqTestAddJob(t *testing.T, jq JobQueuer) {
 	}
 }
 
-func jqTestChangeJobState(t *testing.T, jq JobQueuer) {
+func jqTestChangeJobState(t *testing.T, jq srv.JobQueuer) {
 	expectedJobs, revId := addJobs(t, jq, testJobs)
 
 	oldState, err := jq.ChangeJobState(expectedJobs[0].JobId, fuq.Running)
@@ -181,10 +182,10 @@ func jqTestChangeJobState(t *testing.T, jq JobQueuer) {
 	}
 }
 
-func jqTestClearJobs(t *testing.T, jq JobQueuer) {
+func jqTestClearJobs(t *testing.T, jq srv.JobQueuer) {
 	expectedJobs, _ := addJobs(t, jq, testJobs)
 
-	jobs, err := AllJobs(jq)
+	jobs, err := srv.AllJobs(jq)
 	if err != nil {
 		t.Fatalf("error fetching jobs: %v", err)
 	}
@@ -198,7 +199,7 @@ func jqTestClearJobs(t *testing.T, jq JobQueuer) {
 		t.Fatalf("error clearing jobs: %v", err)
 	}
 
-	jobs, err = AllJobs(jq)
+	jobs, err = srv.AllJobs(jq)
 	if err != nil {
 		t.Fatalf("error fetching jobs: %v", err)
 	}
@@ -209,7 +210,7 @@ func jqTestClearJobs(t *testing.T, jq JobQueuer) {
 	}
 }
 
-func jqTestFetchJobId(t *testing.T, jq JobQueuer) {
+func jqTestFetchJobId(t *testing.T, jq srv.JobQueuer) {
 	expectedJobs, revId := addJobs(t, jq, testJobs)
 	for id, ind := range revId {
 		job, err := jq.FetchJobId(id)
@@ -221,7 +222,7 @@ func jqTestFetchJobId(t *testing.T, jq JobQueuer) {
 	}
 }
 
-func jqTestFetchPendingTasks(t *testing.T, jq JobQueuer) {
+func jqTestFetchPendingTasks(t *testing.T, jq srv.JobQueuer) {
 	tasks, err := jq.FetchPendingTasks(2)
 	if err != nil {
 		t.Fatalf("error fetching pending tasks (no tasks): %v", err)
@@ -333,7 +334,7 @@ func checkJobTaskStatus(actual, expected fuq.JobTaskStatus) error {
 	return nil
 }
 
-func jqTestFetchAndUpdatePendingTasks(t *testing.T, jq JobQueuer) {
+func jqTestFetchAndUpdatePendingTasks(t *testing.T, jq srv.JobQueuer) {
 	tasks, err := jq.FetchPendingTasks(4)
 	if err != nil {
 		t.Fatalf("error fetching pending tasks (no tasks): %v", err)
@@ -404,7 +405,7 @@ func jqTestFetchAndUpdatePendingTasks(t *testing.T, jq JobQueuer) {
 
 type jqTest struct {
 	Name string
-	Test func(*testing.T, JobQueuer)
+	Test func(*testing.T, srv.JobQueuer)
 }
 
 var jqTestTable []jqTest = []jqTest{

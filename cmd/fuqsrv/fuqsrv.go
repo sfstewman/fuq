@@ -13,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/sfstewman/fuq"
+	"github.com/sfstewman/fuq/db"
 	"github.com/sfstewman/fuq/node"
 	"github.com/sfstewman/fuq/srv"
 	"log"
@@ -244,7 +245,19 @@ func main() {
 		log.Printf("Starting foreman")
 
 		go func() {
-			f, err := srv.NewForeman(config, done)
+			stores, err := db.NewStores(db.Files{Jobs: config.DbPath})
+			if err != nil {
+				log.Printf("error opening db stores: %v", err)
+				return
+			}
+			defer stores.Close()
+
+			f, err := srv.NewForeman(srv.ForemanOpts{
+				Auth:        config,
+				Queuer:      stores.Jobs,
+				CookieMaker: stores.Cookies,
+				Done:        done,
+			})
 			defer close(done)
 
 			if err != nil {
@@ -253,7 +266,7 @@ func main() {
 			}
 			defer f.Close()
 
-			if err := f.Run(); err != nil {
+			if err := srv.StartAPIServer(f, config); err != nil {
 				log.Printf("error starting foreman: %v", err)
 				return
 			}

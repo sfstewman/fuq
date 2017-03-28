@@ -5,18 +5,46 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/sfstewman/fuq"
-	"github.com/sfstewman/fuq/db"
-	"golang.org/x/net/http2"
 	"log"
 	"net/http"
 	"os"
 	"sync"
 )
 
+type JobQueuer interface {
+	Close() error
+	ClearJobs() error
+	FetchJobs(name, status string) ([]fuq.JobDescription, error)
+	FetchJobId(fuq.JobId) (fuq.JobDescription, error)
+	ChangeJobState(jobId fuq.JobId, newState fuq.JobStatus) (fuq.JobStatus, error)
+	AddJob(job fuq.JobDescription) (fuq.JobId, error)
+	UpdateTaskStatus(update fuq.JobStatusUpdate) error
+	FetchJobTaskStatus(jobId fuq.JobId) (fuq.JobTaskStatus, error)
+	FetchPendingTasks(nproc int) ([]fuq.Task, error)
+}
+
+func AllJobs(q JobQueuer) ([]fuq.JobDescription, error) {
+	return q.FetchJobs("", "")
+}
+
+type AuthChecker interface {
+	CheckAuth(cred string) bool
+	CheckClient(client fuq.Client) bool
+}
+
+type ForemanOpts struct {
+	Auth        AuthChecker
+	Queuer      JobQueuer
+	CookieMaker fuq.CookieMaker
+	Done        chan<- struct{}
+}
+
 type Foreman struct {
-	db.JobQueuer
+	JobQueuer
 	fuq.CookieMaker
-	stores *db.Stores
+	Auth AuthChecker
+
+	Done chan<- struct{}
 
 	// XXX: worth replacing with something that can scale?
 	// we need to lock the database with every request; should
@@ -26,17 +54,14 @@ type Foreman struct {
 		shutdownHost map[string]struct{}
 	}
 
-	Config fuq.Config
-
 	jobsSignal struct {
 		mu    sync.Mutex
 		ready chan struct{}
 	}
-	Done chan<- struct{}
 }
 
 func (f *Foreman) Close() error {
-	return f.stores.Close()
+	return nil
 }
 
 func (f *Foreman) ready(lock bool) <-chan struct{} {
@@ -51,21 +76,14 @@ func (f *Foreman) ready(lock bool) <-chan struct{} {
 	return f.jobsSignal.ready
 }
 
-func NewForeman(config fuq.Config, done chan<- struct{}) (*Foreman, error) {
-	stores, err := db.NewStores(db.Files{Jobs: config.DbPath})
-	if err != nil {
-		return nil, err
-	}
-
+func NewForeman(opts ForemanOpts) (*Foreman, error) {
 	f := Foreman{
-		Config:      config,
-		JobQueuer:   stores.Jobs,
-		CookieMaker: stores.Cookies,
-		stores:      stores,
-		Done:        done,
+		Auth:        opts.Auth,
+		JobQueuer:   opts.Queuer,
+		CookieMaker: opts.CookieMaker,
+		Done:        opts.Done,
 	}
 
-	// f.jobsSignal.cond = sync.NewCond(&f.jobsSignal.mu)
 	f.shutdownReq.shutdownHost = make(map[string]struct{})
 
 	return &f, nil
@@ -82,11 +100,11 @@ func (f *Foreman) IsNodeShutdown(name string) bool {
 }
 
 func (f *Foreman) CheckAuth(cred string) bool {
-	return f.Config.CheckAuth(cred)
+	return f.Auth.CheckAuth(cred)
 }
 
 func (f *Foreman) CheckClient(client fuq.Client) bool {
-	return f.Config.CheckClient(client)
+	return f.Auth.CheckClient(client)
 }
 
 func (f *Foreman) HandleHello(resp http.ResponseWriter, req *http.Request) {
@@ -391,12 +409,6 @@ func (f *Foreman) HandleClientJobList(resp http.ResponseWriter, req *http.Reques
 		}
 	}
 
-	/*
-		if listReq.Status == "" && listReq.Name == "" {
-		} else {
-		}
-	*/
-
 	jobs, err := f.FetchJobs(listReq.Name, listReq.Status)
 	if err != nil {
 		log.Printf("error retrieving job list: %v", err)
@@ -547,7 +559,7 @@ func (f *Foreman) HandleClientShutdown(resp http.ResponseWriter, req *http.Reque
 }
 
 func (f *Foreman) AddNodeHandler(mux *http.ServeMux, path string, handler NodeRequestHandler) {
-	f.AddHandler(mux, path, http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+	AddHandler(mux, path, http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		msg := json.RawMessage{}
 		envelope := NodeRequestEnvelope{Msg: &msg}
 
@@ -579,7 +591,7 @@ func (f *Foreman) AddNodeHandler(mux *http.ServeMux, path string, handler NodeRe
 }
 
 func (f *Foreman) AddClientHandler(mux *http.ServeMux, path string, handler ClientRequestHandler) {
-	f.AddHandler(mux, path, http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+	AddHandler(mux, path, http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		msg := json.RawMessage{}
 		envelope := ClientRequestEnvelope{Msg: &msg}
 
@@ -600,81 +612,4 @@ func (f *Foreman) AddClientHandler(mux *http.ServeMux, path string, handler Clie
 
 		handler(resp, req, []byte(msg))
 	}))
-}
-
-func (f *Foreman) AddHandler(mux *http.ServeMux, path string, handler http.HandlerFunc) {
-	mux.HandleFunc(path,
-		func(resp http.ResponseWriter, req *http.Request) {
-			// log.Printf("request %s %s", req.Method, req.URL)
-			if req.Method != "POST" {
-				fuq.BadMethod(resp, req)
-				return
-			}
-
-			if req.URL.Path != path {
-				fuq.Forbidden(resp, req)
-				return
-			}
-
-			// log.Printf("request: %v", req)
-
-			handler(resp, req)
-		})
-}
-
-func (f *Foreman) StartAPIServer() error {
-	log.Printf("Starting API server on %s:%d",
-		f.Config.Foreman, f.Config.Port)
-
-	mux := http.NewServeMux()
-
-	log.Printf("Adding handlers")
-	f.AddHandler(mux, "/hello", f.HandleHello)
-	f.AddHandler(mux, "/node/reauth", f.HandleNodeReauth)
-
-	f.AddNodeHandler(mux, "/job/request", f.HandleNodeJobRequest)
-	f.AddNodeHandler(mux, "/job/status", f.HandleNodeJobUpdate)
-
-	f.AddClientHandler(mux, "/client/nodes/list", f.HandleClientNodeList)
-	f.AddClientHandler(mux, "/client/nodes/shutdown", f.HandleClientNodeShutdown)
-
-	f.AddClientHandler(mux, "/client/job/list", f.HandleClientJobList)
-	f.AddClientHandler(mux, "/client/job/new", f.HandleClientJobNew)
-	f.AddClientHandler(mux, "/client/job/clear", f.HandleClientJobClear)
-	f.AddClientHandler(mux, "/client/job/state", f.HandleClientJobState)
-
-	f.AddClientHandler(mux, "/client/shutdown", f.HandleClientShutdown)
-
-	tlsConfig, err := fuq.SetupTLS(f.Config)
-	if err != nil {
-		log.Printf("error setting up TLS: %v", err)
-		return fmt.Errorf("Error starting foreman: %v", err)
-	}
-
-	addrPortPair := fmt.Sprintf("%s:%d", f.Config.Foreman, f.Config.Port)
-
-	srv := http.Server{
-		Addr:      addrPortPair,
-		Handler:   mux,
-		TLSConfig: tlsConfig,
-	}
-
-	// enable http/2 support
-	if err := http2.ConfigureServer(&srv, nil); err != nil {
-		return fmt.Errorf("error adding http/2 support: %v", err)
-	}
-	// tlsConfig.NextProtos = append(tlsConfig.NextProtos, "h2")
-
-	if err := srv.ListenAndServeTLS("", ""); err != nil {
-		return fmt.Errorf("Error starting foreman: %v", err)
-	}
-
-	return nil
-}
-
-func (f *Foreman) Run() error {
-	// WriteFuqConfig(f.Config)
-
-	// setup API server
-	return f.StartAPIServer()
 }
