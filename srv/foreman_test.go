@@ -1,0 +1,791 @@
+package srv
+
+import (
+	// "context"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"github.com/sfstewman/fuq"
+	"math/rand"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"sort"
+	"sync"
+	"testing"
+	// "log"
+)
+
+type okAuth struct{}
+
+func (okAuth) CheckAuth(cred string) bool {
+	return true
+}
+
+func (okAuth) CheckClient(client fuq.Client) bool {
+	return true
+}
+
+type simpleCookieJar struct {
+	mu sync.Mutex
+
+	nodes      map[string]fuq.NodeInfo
+	cookies    map[fuq.Cookie]string
+	revCookies map[string]fuq.Cookie
+}
+
+func newSimpleCookieJar() *simpleCookieJar {
+	return &simpleCookieJar{
+		nodes:      make(map[string]fuq.NodeInfo),
+		cookies:    make(map[fuq.Cookie]string),
+		revCookies: make(map[string]fuq.Cookie),
+	}
+}
+
+func (jar *simpleCookieJar) IsUniqueName(n string) (bool, error) {
+	_, ok := jar.nodes[n]
+	return ok, nil
+}
+
+func RandomText(r *rand.Rand, txt []byte) {
+	for i := 0; i < len(txt); i++ {
+		var x int
+		if r != nil {
+			x = r.Intn(62)
+		} else {
+			x = rand.Intn(62)
+		}
+
+		switch {
+		case x < 26:
+			txt[i] = byte('A' + x)
+		case x < 52:
+			txt[i] = byte('a' + (x - 26))
+		default:
+			txt[i] = byte('0' + (x - 52))
+		}
+	}
+}
+
+func (jar *simpleCookieJar) uniquifyName(ni fuq.NodeInfo) string {
+	/* assumes that the lock is held by the caller */
+	n := ni.UniqName
+
+	if n != "" && n != ni.Node {
+		if _, ok := jar.nodes[n]; !ok {
+			return n
+		}
+	}
+
+	i := 1
+	for {
+		uniqName := fmt.Sprintf("%s-%d", ni.Node, i)
+		if _, ok := jar.nodes[n]; !ok {
+			return uniqName
+		}
+
+		i++
+	}
+}
+
+func (jar *simpleCookieJar) generateCookie() fuq.Cookie {
+	/* assumes that the lock is held by the caller */
+	var rawCookie [8]byte
+	var cookie fuq.Cookie
+
+	for {
+		RandomText(nil, rawCookie[:])
+		cookie = fuq.Cookie(rawCookie[:])
+		if _, ok := jar.cookies[cookie]; !ok {
+			return cookie
+		}
+	}
+}
+
+func (jar *simpleCookieJar) MakeCookie(ni fuq.NodeInfo) (fuq.Cookie, error) {
+	jar.mu.Lock()
+	defer jar.mu.Unlock()
+
+	uniqName := jar.uniquifyName(ni)
+	ni.UniqName = uniqName
+	jar.nodes[uniqName] = ni
+
+	if _, ok := jar.revCookies[uniqName]; ok {
+		panic("cookie already associated with unique name " + ni.UniqName)
+	}
+
+	cookie := jar.generateCookie()
+	jar.cookies[cookie] = uniqName
+	jar.revCookies[uniqName] = cookie
+
+	// fmt.Printf("\n\n(%v).MakeCookie finished.  revCookies map is %v\n\n", jar, jar.revCookies)
+
+	return cookie, nil
+}
+
+func (jar *simpleCookieJar) RenewCookie(ni fuq.NodeInfo) (fuq.Cookie, error) {
+	jar.mu.Lock()
+	defer jar.mu.Unlock()
+
+	// fmt.Printf("\n\n(%v).RenewCookie called.  revCookies map is %v\n\n",
+	//	jar, jar.revCookies)
+
+	uniqName := ni.UniqName
+	prevCookie, ok := jar.revCookies[uniqName]
+	if !ok {
+		panic(fmt.Sprintf("no cookie associated with uniq name '%s'", uniqName))
+	}
+
+	delete(jar.cookies, prevCookie)
+
+	cookie := jar.generateCookie()
+	jar.cookies[cookie] = uniqName
+	jar.revCookies[uniqName] = cookie
+
+	return cookie, nil
+}
+
+func (jar *simpleCookieJar) ExpireCookie(c fuq.Cookie) error {
+	jar.mu.Lock()
+	defer jar.mu.Unlock()
+
+	_, ok := jar.cookies[c]
+	if !ok {
+		panic("cannot expired unrecognized cookie")
+	}
+
+	delete(jar.cookies, c)
+
+	return nil
+}
+
+func (jar *simpleCookieJar) Lookup(c fuq.Cookie) (fuq.NodeInfo, error) {
+	jar.mu.Lock()
+	defer jar.mu.Unlock()
+
+	uniqName, ok := jar.cookies[c]
+	if !ok {
+		return fuq.NodeInfo{}, fmt.Errorf("unknown cookie: %s", c)
+	}
+
+	ni, ok := jar.nodes[uniqName]
+	if !ok {
+		panic(fmt.Sprintf("cookie '%s' associated with invalid unique name %s",
+			c, uniqName))
+	}
+
+	return ni, nil
+}
+
+func (jar *simpleCookieJar) LookupName(uniqName string) (fuq.NodeInfo, fuq.Cookie, error) {
+	var (
+		cookie fuq.Cookie
+		ni     fuq.NodeInfo
+		ok     bool
+	)
+
+	jar.mu.Lock()
+	defer jar.mu.Unlock()
+
+	cookie, ok = jar.revCookies[uniqName]
+	if !ok {
+		return ni, cookie, fmt.Errorf("no cookie associated with name '%s'", uniqName)
+	}
+
+	ni, ok = jar.nodes[uniqName]
+	if !ok {
+		return ni, cookie, fmt.Errorf("no node associated with name '%s'", uniqName)
+	}
+
+	return ni, cookie, nil
+}
+
+func (jar *simpleCookieJar) AllNodes() ([]fuq.NodeInfo, error) {
+	jar.mu.Lock()
+	defer jar.mu.Unlock()
+
+	nodes := make([]fuq.NodeInfo, len(jar.nodes))
+	i := 0
+	for _, ni := range jar.nodes {
+		nodes[i] = ni
+		i++
+	}
+
+	return nodes, nil
+}
+
+type simpleQueuer struct {
+	mu     sync.Mutex
+	jobs   []fuq.JobDescription
+	status []fuq.JobTaskData
+}
+
+func (q *simpleQueuer) Close() error {
+	return nil
+}
+
+func (q *simpleQueuer) ClearJobs() error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	q.jobs = nil
+	return nil
+}
+
+func (q *simpleQueuer) EachJob(fn func(fuq.JobDescription) error) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	for _, job := range q.jobs {
+		if err := fn(job); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (q *simpleQueuer) FetchJobId(id fuq.JobId) (fuq.JobDescription, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	ind := int(id) - 1
+	if ind < 0 || ind >= len(q.jobs) {
+		return fuq.JobDescription{}, fmt.Errorf("invalid job id %d", id)
+	}
+
+	return q.jobs[ind], nil
+}
+
+func (q *simpleQueuer) ChangeJobState(jobId fuq.JobId, newState fuq.JobStatus) (fuq.JobStatus, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	ind := int(jobId) - 1
+	if ind < 0 || ind >= len(q.jobs) {
+		return fuq.JobStatus(0), fmt.Errorf("invalid job id %d", jobId)
+	}
+
+	prevStatus := q.jobs[ind].Status
+	q.jobs[ind].Status = newState
+
+	return prevStatus, nil
+}
+
+func (q *simpleQueuer) AddJob(job fuq.JobDescription) (fuq.JobId, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	q.jobs = append(q.jobs, job)
+	q.status = append(q.status, fuq.JobTaskData{})
+
+	n := len(q.jobs)
+	if n != len(q.status) {
+		panic("invalid simpleQueuer state")
+	}
+
+	jobId := fuq.JobId(n)
+	q.jobs[n-1].JobId = jobId
+
+	return jobId, nil
+}
+
+func (q *simpleQueuer) UpdateTaskStatus(update fuq.JobStatusUpdate) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	ind := int(update.JobId) - 1
+	if ind < 0 || ind >= len(q.jobs) {
+		return fmt.Errorf("invalid job id %d", update.JobId)
+	}
+
+	return q.status[ind].Update(update)
+}
+
+func (q *simpleQueuer) FetchJobTaskStatus(jobId fuq.JobId) (fuq.JobTaskStatus, error) {
+	var status fuq.JobTaskStatus
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	ind := int(jobId) - 1
+	if ind < 0 || ind >= len(q.jobs) {
+		return status, fmt.Errorf("invalid job id %d", jobId)
+	}
+
+	desc := q.jobs[ind]
+	tasks := q.status[ind]
+	status = fuq.MakeJobStatusUpdate(desc, tasks)
+	return status, nil
+}
+
+func (q *simpleQueuer) FetchPendingTasks(nproc int) ([]fuq.Task, error) {
+	tasks := make([]fuq.Task, 0, nproc)
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if nproc <= 0 {
+		return nil, nil
+	}
+
+	for ind, desc := range q.jobs {
+		switch desc.Status {
+		case fuq.Waiting:
+			/* convert to a running task */
+			nt := desc.NumTasks
+			pending := make([]int, nt)
+			for i := 0; i < nt; i++ {
+				pending[i] = i + 1
+			}
+
+			q.jobs[ind].Status = fuq.Running
+
+			q.status[ind] = fuq.JobTaskData{
+				JobId:   desc.JobId,
+				Pending: pending,
+			}
+			fallthrough
+
+		case fuq.Running:
+			status := q.status[ind]
+			if len(status.Pending) == 0 {
+				continue
+			}
+
+			n := nproc
+			pending := status.Pending
+			if len(pending) < nproc {
+				n = len(pending)
+			}
+
+			for _, task := range pending[:n] {
+				tasks = append(tasks, fuq.Task{
+					Task:           task,
+					JobDescription: desc,
+				})
+				status.Running = append(status.Running, task)
+			}
+
+			status.Pending = status.Pending[n:]
+			sort.Ints(status.Running)
+			q.status[ind] = status
+
+		default:
+			/* nop */
+		}
+
+		if len(tasks) == nproc {
+			break
+		}
+	}
+
+	return tasks, nil
+}
+
+func newTestingForeman() *Foreman {
+	f, err := NewForeman(ForemanOpts{
+		Auth:        okAuth{},
+		Queuer:      &simpleQueuer{},
+		CookieMaker: newSimpleCookieJar(),
+		Done:        make(chan struct{}),
+	})
+
+	if err != nil {
+		panic(fmt.Sprintf("error making foreman: %v", err))
+	}
+
+	return f
+}
+
+func makeNodeInfo() fuq.NodeInfo {
+	return fuq.NodeInfo{
+		Node:    "voltron",
+		Pid:     18,
+		NumProc: 4,
+	}
+}
+
+type roundTrip struct {
+	T *testing.T
+
+	Msg    interface{}
+	Dst    interface{}
+	Target string
+}
+
+func (rt roundTrip) TestHandler(fn func(http.ResponseWriter, *http.Request)) {
+	t := rt.T
+
+	encode, err := json.Marshal(rt.Msg)
+	if err != nil {
+		t.Fatalf("error marshaling message: %v", err)
+	}
+
+	req := httptest.NewRequest("POST", rt.Target, bytes.NewReader(encode))
+	wr := httptest.NewRecorder()
+
+	fn(wr, req)
+
+	resp := wr.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("response was '%s', not OK", resp.Status)
+	}
+
+	dec := json.NewDecoder(resp.Body)
+	if err := dec.Decode(rt.Dst); err != nil {
+		t.Fatalf("error unmarshaling response: %v", err)
+	}
+}
+
+func (rt roundTrip) TestClientHandler(fn func(http.ResponseWriter, *http.Request, []byte)) {
+	t := rt.T
+
+	mesg, err := json.Marshal(rt.Msg)
+	if err != nil {
+		t.Fatalf("error marshaling message: %v", err)
+	}
+
+	env := ClientRequestEnvelope{
+		Auth: fuq.Client{Password: "some_password", Client: "some_client"},
+		Msg:  rt.Msg,
+	}
+
+	encode, err := json.Marshal(&env)
+	if err != nil {
+		t.Fatalf("error marshaling client request: %v", err)
+	}
+
+	req := httptest.NewRequest("POST", rt.Target, bytes.NewReader(encode))
+	wr := httptest.NewRecorder()
+
+	fn(wr, req, mesg)
+
+	resp := wr.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("response was '%s', not OK", resp.Status)
+	}
+
+	dec := json.NewDecoder(resp.Body)
+	if err := dec.Decode(rt.Dst); err != nil {
+		t.Fatalf("error unmarshaling response: %v", err)
+	}
+}
+
+func (rt roundTrip) TestNodeHandler(fn func(http.ResponseWriter, *http.Request, []byte, fuq.NodeInfo), ni fuq.NodeInfo) {
+	t := rt.T
+
+	mesg, err := json.Marshal(rt.Msg)
+	if err != nil {
+		t.Fatalf("error marshaling message: %v", err)
+	}
+
+	env := ClientRequestEnvelope{
+		Auth: fuq.Client{Password: "some_password", Client: "some_client"},
+		Msg:  rt.Msg,
+	}
+
+	encode, err := json.Marshal(&env)
+	if err != nil {
+		t.Fatalf("error marshaling client request: %v", err)
+	}
+
+	req := httptest.NewRequest("POST", rt.Target, bytes.NewReader(encode))
+	wr := httptest.NewRecorder()
+
+	fn(wr, req, mesg, ni)
+
+	resp := wr.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("response was '%s', not OK", resp.Status)
+	}
+
+	dec := json.NewDecoder(resp.Body)
+	if err := dec.Decode(rt.Dst); err != nil {
+		t.Fatalf("error unmarshaling response: %v", err)
+	}
+}
+
+func sendHello(t *testing.T, f *Foreman, hello fuq.Hello, envp *HelloResponseEnv) {
+	roundTrip{
+		T:      t,
+		Msg:    &hello,
+		Dst:    envp,
+		Target: "/hello",
+	}.TestHandler(f.HandleHello)
+}
+
+func checkCookieInfo(t *testing.T, f *Foreman, cookie fuq.Cookie, ni fuq.NodeInfo) {
+	jar := f.CookieMaker.(*simpleCookieJar)
+
+	// test against cookie jar information
+	ni1, cookie1, err := jar.LookupName(ni.UniqName)
+	if err != nil {
+		t.Fatalf("error looking up cookie info for '%s': %v", ni.UniqName, err)
+	}
+
+	if cookie != cookie1 {
+		t.Fatalf("cookies do not match: expected %s but found %s",
+			cookie, cookie1)
+	}
+
+	if !reflect.DeepEqual(ni, ni1) {
+		t.Fatalf("node info is different: expected %v but found %v",
+			ni, ni1)
+	}
+
+	ni2, err := jar.Lookup(cookie)
+	if err != nil {
+		t.Fatalf("error looking up info for cookie '%s': %v", cookie, err)
+	}
+
+	if !reflect.DeepEqual(ni, ni2) {
+		t.Fatalf("node info is different: expected %v but found %v",
+			ni, ni2)
+	}
+}
+
+func TestForemanHello(t *testing.T) {
+	f := newTestingForeman()
+
+	ni := makeNodeInfo()
+	hello := fuq.Hello{
+		Auth:     "dummy_auth",
+		NodeInfo: ni,
+	}
+
+	env := HelloResponseEnv{}
+	sendHello(t, f, hello, &env)
+
+	if env.Name == nil || env.Cookie == nil {
+		t.Fatalf("response is incomplete: %#v", env)
+	}
+
+	ni.UniqName = *env.Name
+	cookie := *env.Cookie
+
+	checkCookieInfo(t, f, cookie, ni)
+}
+
+func TestForemanNodeReauth(t *testing.T) {
+	f := newTestingForeman()
+	ni := makeNodeInfo()
+	hello := fuq.Hello{
+		Auth:     "dummy_auth",
+		NodeInfo: ni,
+	}
+	env := HelloResponseEnv{}
+	sendHello(t, f, hello, &env)
+
+	ni.UniqName = *env.Name
+	cookie := *env.Cookie
+
+	hello.NodeInfo = ni
+	reqEnv := NodeRequestEnvelope{
+		Cookie: cookie,
+		Msg:    &hello,
+	}
+
+	resp := HelloResponseEnv{}
+	roundTrip{
+		T:      t,
+		Msg:    &reqEnv,
+		Dst:    &resp,
+		Target: "/node/reauth",
+	}.TestHandler(f.HandleNodeReauth)
+
+	if resp.Name == nil || resp.Cookie == nil {
+		t.Fatalf("reauth response is incomplete: %#v", env)
+	}
+
+	newCookie := *resp.Cookie
+	checkCookieInfo(t, f, newCookie, ni)
+}
+
+func doNodeAuth(t *testing.T, f *Foreman) (fuq.NodeInfo, fuq.Cookie) {
+	ni := makeNodeInfo()
+	hello := fuq.Hello{
+		Auth:     "dummy_auth",
+		NodeInfo: ni,
+	}
+	env := HelloResponseEnv{}
+	sendHello(t, f, hello, &env)
+
+	ni.UniqName = *env.Name
+	cookie := *env.Cookie
+
+	return ni, cookie
+}
+
+func TestForemanNodeJobRequestAndUpdate(t *testing.T) {
+	f := newTestingForeman()
+	ni, cookie := doNodeAuth(t, f)
+	_ = cookie
+
+	queue := f.JobQueuer.(*simpleQueuer)
+	id, err := queue.AddJob(fuq.JobDescription{
+		Name:       "job1",
+		NumTasks:   8,
+		WorkingDir: "/foo/bar",
+		LoggingDir: "/foo/bar/logs",
+		Command:    "/foo/foo_it.sh",
+	})
+
+	if err != nil {
+		t.Fatalf("error queuing job: %v", err)
+	}
+
+	job, err := queue.FetchJobId(id)
+	if err != nil {
+		t.Fatalf("error fetching job: %v", err)
+	}
+
+	if job.Name != "job1" {
+		t.Fatalf("expected job name '%s' but found '%s'",
+			"job1", job.Name)
+	}
+
+	req := fuq.JobRequest{NumProc: 4}
+	resp := []fuq.Task{}
+	roundTrip{
+		T:      t,
+		Msg:    &req,
+		Dst:    &resp,
+		Target: "/job/request",
+	}.TestNodeHandler(f.HandleNodeJobRequest, ni)
+	t.Logf("response is %v", resp)
+
+	if len(resp) != 4 {
+		t.Errorf("expected len(resp) == 4, but len(resp) == %d", len(resp))
+	}
+
+	for i, task := range resp {
+		if task.Task != i+1 {
+			t.Errorf("resp[%d].Task is %d, expected %d",
+				i, task.Task, i+1)
+		}
+
+		if task.JobDescription != job {
+			t.Errorf("resp[%d].JobDescription is %v, expected %v",
+				task.JobDescription, job)
+		}
+	}
+
+	// ensure that the queuer is updated
+	job1, err := queue.FetchJobId(id)
+	if err != nil {
+		t.Fatalf("error fetching job %d: %v", id, err)
+	}
+
+	if job1.Status != fuq.Running {
+		t.Errorf("expected job %d to have status 'running', but status is '%s'",
+			job.JobId, job1.Status)
+	}
+
+	job.Status = fuq.Running
+	status0 := fuq.JobTaskStatus{
+		Description:     job,
+		TasksFinished:   0,
+		TasksPending:    4,
+		TasksRunning:    []int{1, 2, 3, 4},
+		TasksWithErrors: []int{},
+	}
+
+	status, err := queue.FetchJobTaskStatus(id)
+	if err != nil {
+		t.Fatalf("error fetching job status: %v", err)
+	}
+
+	if !reflect.DeepEqual(status, status0) {
+		t.Fatalf("expected job status '%v', but status is '%v'",
+			status0, status)
+	}
+
+	// send an update
+	upd := fuq.JobStatusUpdate{
+		JobId:   id,
+		Task:    3,
+		Success: true,
+		Status:  "done",
+		NewJob:  &fuq.JobRequest{NumProc: 1},
+	}
+
+	resp = []fuq.Task{}
+	roundTrip{
+		T:      t,
+		Msg:    &upd,
+		Dst:    &resp,
+		Target: "/job/status",
+	}.TestNodeHandler(f.HandleNodeJobUpdate, ni)
+
+	// check update
+	if len(resp) != 1 {
+		t.Fatalf("expected len(resp) == 1, but len(resp) == %d", len(resp))
+	}
+
+	if resp[0].Task != 5 || resp[0].JobDescription != job {
+		t.Errorf("expected Task 5 of job %d, but received '%v'",
+			id, resp[0])
+	}
+
+	// check that queue has updated the task information
+	status0 = fuq.JobTaskStatus{
+		Description:     job,
+		TasksFinished:   1,
+		TasksPending:    3,
+		TasksRunning:    []int{1, 2, 4, 5},
+		TasksWithErrors: []int{},
+	}
+
+	status, err = queue.FetchJobTaskStatus(id)
+	if err != nil {
+		t.Fatalf("error fetching job status: %v", err)
+	}
+
+	if !reflect.DeepEqual(status, status0) {
+		t.Fatalf("expected job status '%v', but status is '%v'",
+			status0, status)
+	}
+}
+
+func TestForemanClientJobNew(t *testing.T) {
+	f := newTestingForeman()
+
+	job0 := fuq.JobDescription{
+		Name:       "job1",
+		NumTasks:   16,
+		WorkingDir: "/foo/bar",
+		LoggingDir: "/foo/bar/logs",
+		Command:    "/foo/foo_it.sh",
+	}
+
+	resp := fuq.NewJobResponse{}
+
+	roundTrip{
+		T:      t,
+		Msg:    &job0,
+		Dst:    &resp,
+		Target: "/client/job/new",
+	}.TestClientHandler(f.HandleClientJobNew)
+	t.Logf("response is %v", resp)
+
+	job0.JobId = resp.JobId
+	job0.Status = fuq.Waiting
+
+	queue := f.JobQueuer.(*simpleQueuer)
+
+	job, err := queue.FetchJobId(job0.JobId)
+	if err != nil {
+		t.Fatalf("error fetching by with id '%d': %v", job0.JobId, err)
+	}
+
+	if !reflect.DeepEqual(job, job0) {
+		t.Fatalf("expected job %v, found job %v", job0, job)
+	}
+}
