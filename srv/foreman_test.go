@@ -299,7 +299,19 @@ func (q *simpleQueuer) UpdateTaskStatus(update fuq.JobStatusUpdate) error {
 		return fmt.Errorf("invalid job id %d", update.JobId)
 	}
 
-	return q.status[ind].Update(update)
+	if err := q.status[ind].Update(update); err != nil {
+		return err
+	}
+
+	if len(q.status[ind].Pending)+len(q.status[ind].Running) > 0 {
+		return nil
+	}
+
+	if len(q.status[ind].Finished)+len(q.status[ind].Errors) == q.jobs[ind].NumTasks {
+		q.jobs[ind].Status = fuq.Finished
+	}
+
+	return nil
 }
 
 func (q *simpleQueuer) FetchJobTaskStatus(jobId fuq.JobId) (fuq.JobTaskStatus, error) {
@@ -353,7 +365,7 @@ func (q *simpleQueuer) FetchPendingTasks(nproc int) ([]fuq.Task, error) {
 				continue
 			}
 
-			n := nproc
+			n := nproc - len(tasks)
 			pending := status.Pending
 			if len(pending) < nproc {
 				n = len(pending)
@@ -787,5 +799,227 @@ func TestForemanClientJobNew(t *testing.T) {
 
 	if !reflect.DeepEqual(job, job0) {
 		t.Fatalf("expected job %v, found job %v", job0, job)
+	}
+}
+
+func TestForemanClientJobList(t *testing.T) {
+	f := newTestingForeman()
+
+	jobs := []fuq.JobDescription{
+		{
+			Name:       "job1",
+			NumTasks:   16,
+			WorkingDir: "/foo/bar",
+			LoggingDir: "/foo/bar/logs",
+			Command:    "/foo/foo_it.sh",
+		},
+		{
+			Name:       "job2",
+			NumTasks:   27,
+			WorkingDir: "/foo/baz",
+			LoggingDir: "/foo/baz/logs",
+			Command:    "/foo/baz_it.sh",
+		},
+	}
+
+	for i, j := range jobs {
+		resp := fuq.NewJobResponse{}
+		roundTrip{
+			T:      t,
+			Msg:    &j,
+			Dst:    &resp,
+			Target: "/client/job/new",
+		}.TestClientHandler(f.HandleClientJobNew)
+		jobs[i].JobId = resp.JobId
+		jobs[i].Status = fuq.Waiting
+	}
+
+	queue := f.JobQueuer.(*simpleQueuer)
+
+	resp := []fuq.JobTaskStatus{}
+	roundTrip{
+		T:      t,
+		Msg:    &fuq.ClientJobListReq{},
+		Dst:    &resp,
+		Target: "/client/job/list",
+	}.TestClientHandler(f.HandleClientJobList)
+	// t.Logf("response is %v", resp)
+
+	expectedResp := []fuq.JobTaskStatus{
+		{
+			Description:     jobs[0],
+			TasksFinished:   0,
+			TasksPending:    0,
+			TasksRunning:    nil,
+			TasksWithErrors: nil,
+		},
+		{
+			Description:     jobs[1],
+			TasksFinished:   0,
+			TasksPending:    0,
+			TasksRunning:    nil,
+			TasksWithErrors: nil,
+		},
+	}
+
+	if !reflect.DeepEqual(resp, expectedResp) {
+		t.Fatalf("expected response '%#v', but found '%#v'",
+			expectedResp, resp)
+	}
+
+	tasks, err := queue.FetchPendingTasks(17)
+	if err != nil {
+		t.Fatalf("error fetching tasks: %v", err)
+	}
+
+	if len(tasks) != 17 {
+		t.Fatalf("expected 17 tasks returned, but recevied %d", len(tasks))
+	}
+
+	resp = []fuq.JobTaskStatus{}
+	roundTrip{
+		T:      t,
+		Msg:    &fuq.ClientJobListReq{},
+		Dst:    &resp,
+		Target: "/client/job/list",
+	}.TestClientHandler(f.HandleClientJobList)
+	// t.Logf("response is %v", resp)
+
+	jobs[0].Status = fuq.Running
+	jobs[1].Status = fuq.Running
+	expectedResp = []fuq.JobTaskStatus{
+		{
+			Description:     jobs[0],
+			TasksFinished:   0,
+			TasksPending:    0,
+			TasksRunning:    []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+			TasksWithErrors: []int{},
+		},
+		{
+			Description:     jobs[1],
+			TasksFinished:   0,
+			TasksPending:    26,
+			TasksRunning:    []int{1},
+			TasksWithErrors: []int{},
+		},
+	}
+
+	if !reflect.DeepEqual(resp, expectedResp) {
+		t.Fatalf("expected response '%#v', but found '%#v'",
+			expectedResp, resp)
+	}
+
+	queue.UpdateTaskStatus(fuq.JobStatusUpdate{
+		JobId:   jobs[0].JobId,
+		Task:    14,
+		Success: true,
+		Status:  "done",
+	})
+
+	queue.UpdateTaskStatus(fuq.JobStatusUpdate{
+		JobId:   jobs[0].JobId,
+		Task:    7,
+		Success: false,
+		Status:  "error: something went wrong",
+	})
+
+	queue.UpdateTaskStatus(fuq.JobStatusUpdate{
+		JobId:   jobs[1].JobId,
+		Task:    1,
+		Success: true,
+		Status:  "done",
+	})
+
+	resp = []fuq.JobTaskStatus{}
+	roundTrip{
+		T:      t,
+		Msg:    &fuq.ClientJobListReq{},
+		Dst:    &resp,
+		Target: "/client/job/list",
+	}.TestClientHandler(f.HandleClientJobList)
+	t.Logf("response is %v", resp)
+
+	expectedResp = []fuq.JobTaskStatus{
+		{
+			Description:     jobs[0],
+			TasksFinished:   1,
+			TasksPending:    0,
+			TasksRunning:    []int{1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 15, 16},
+			TasksWithErrors: []int{7},
+		},
+		{
+			Description:     jobs[1],
+			TasksFinished:   1,
+			TasksPending:    26,
+			TasksRunning:    []int{},
+			TasksWithErrors: []int{},
+		},
+	}
+
+	if !reflect.DeepEqual(resp, expectedResp) {
+		t.Fatalf("expected response '%#v', but found '%#v'",
+			expectedResp, resp)
+	}
+
+	for i := 1; i <= 16; i++ {
+		if i == 7 || i == 14 {
+			continue
+		}
+
+		queue.UpdateTaskStatus(fuq.JobStatusUpdate{
+			JobId:   jobs[0].JobId,
+			Task:    i,
+			Success: true,
+			Status:  "done",
+		})
+	}
+
+	resp = []fuq.JobTaskStatus{}
+	roundTrip{
+		T:      t,
+		Msg:    &fuq.ClientJobListReq{},
+		Dst:    &resp,
+		Target: "/client/job/list",
+	}.TestClientHandler(f.HandleClientJobList)
+	// t.Logf("response is %v", resp)
+
+	expectedResp = []fuq.JobTaskStatus{
+		{
+			Description:     jobs[1],
+			TasksFinished:   1,
+			TasksPending:    26,
+			TasksRunning:    []int{},
+			TasksWithErrors: []int{},
+		},
+	}
+
+	if !reflect.DeepEqual(resp, expectedResp) {
+		t.Fatalf("expected response '%#v', but found '%#v'",
+			expectedResp, resp)
+	}
+
+	resp = []fuq.JobTaskStatus{}
+	roundTrip{
+		T:      t,
+		Msg:    &fuq.ClientJobListReq{Status: "finished"},
+		Dst:    &resp,
+		Target: "/client/job/list",
+	}.TestClientHandler(f.HandleClientJobList)
+	// t.Logf("response is %v", resp)
+
+	jobs[0].Status = fuq.Finished
+	expectedResp = []fuq.JobTaskStatus{
+		{
+			Description:     jobs[0],
+			TasksFinished:   15,
+			TasksPending:    0,
+			TasksRunning:    []int{},
+			TasksWithErrors: []int{7},
+		},
+	}
+
+	if !reflect.DeepEqual(resp, expectedResp) {
+		t.Fatalf("expected response '%#v', but found '%#v'",
+			expectedResp, resp)
 	}
 }

@@ -467,7 +467,7 @@ func (f *Foreman) HandleClientJobList(resp http.ResponseWriter, req *http.Reques
 	jtStatus := make([]fuq.JobTaskStatus, len(jobs))
 
 	for i, j := range jobs {
-		if j.Status != fuq.Running {
+		if listReq.Status == "" && j.Status != fuq.Running && j.Status != fuq.Paused {
 			jtStatus[i].Description = j
 			continue
 		}
