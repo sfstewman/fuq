@@ -15,6 +15,9 @@ type WSPair struct {
 	TmpDir   string
 	Listener net.Listener
 	Server   http.Server
+
+	connCh     chan *websocket.Conn
+	socketPath string
 }
 
 func (wsp *WSPair) Close() {
@@ -23,7 +26,7 @@ func (wsp *WSPair) Close() {
 	os.Remove(wsp.TmpDir)
 }
 
-func NewWSPair(tmpDir string) *WSPair {
+func UnconnectedWSPair(tmpDir string) *WSPair {
 	var wsp WSPair
 
 	wsp.TmpDir = tmpDir
@@ -32,8 +35,8 @@ func NewWSPair(tmpDir string) *WSPair {
 	}
 
 	// XXX - is there a better/portable way?
-	socketPath := filepath.Join(tmpDir, "socket.web")
-	addr, err := net.ResolveUnixAddr("unix", socketPath)
+	wsp.socketPath = filepath.Join(tmpDir, "socket.web")
+	addr, err := net.ResolveUnixAddr("unix", wsp.socketPath)
 	if err != nil {
 		panic(err)
 	}
@@ -45,30 +48,36 @@ func NewWSPair(tmpDir string) *WSPair {
 
 	wsp.Listener = listener
 
-	connCh := make(chan *websocket.Conn)
-	handler := func(w http.ResponseWriter, r *http.Request) {
-		upgrader := websocket.Upgrader{
-			ReadBufferSize:  1024,
-			WriteBufferSize: 1024,
-		}
-
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			panic(err)
-		}
-
-		connCh <- conn
-	}
+	wsp.connCh = make(chan *websocket.Conn)
 
 	wsp.Http = http.Server{
-		Handler: http.HandlerFunc(handler),
+		Handler: &wsp,
 	}
 
-	// start the server side...
-	go wsp.Http.Serve(listener)
+	return &wsp
+}
 
+func (wsp *WSPair) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	upgrader := websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	wsp.connCh <- conn
+}
+
+func (wsp *WSPair) StartServer() {
+	wsp.Http.Serve(wsp.Listener)
+}
+
+func (wsp *WSPair) Dial() error {
 	// start the client side...
-	conn, err := net.Dial("unix", socketPath)
+	conn, err := net.Dial("unix", wsp.socketPath)
 	if err != nil {
 		panic(err)
 	}
@@ -86,7 +95,17 @@ func NewWSPair(tmpDir string) *WSPair {
 		panic(err)
 	}
 	wsp.CConn = cconn
-	wsp.SConn = <-connCh
+	wsp.SConn = <-wsp.connCh
 
-	return &wsp
+	return nil
+}
+
+func NewWSPair(tmpDir string) *WSPair {
+	wsp := UnconnectedWSPair(tmpDir)
+
+	// start the server side...
+	go wsp.StartServer()
+
+	wsp.Dial()
+	return wsp
 }
