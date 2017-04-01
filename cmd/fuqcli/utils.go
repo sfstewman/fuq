@@ -20,7 +20,8 @@ func callEndpoint(cfg fuq.Config, dest string, msg, ret interface{}) error {
 		Msg:  msg,
 	}
 
-	return ep.CallEndpoint(dest, &env, &ret)
+	_, err = ep.CallEndpoint(dest, &env, &ret)
+	return err
 }
 
 type Usage struct {

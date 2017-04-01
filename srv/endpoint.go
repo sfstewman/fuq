@@ -40,7 +40,7 @@ func (w *Endpoint) RequestAction(ctx context.Context, nproc int) (node.WorkerAct
 	ntries := 0
 
 retry:
-	err := w.CallEndpoint("job/request", &req, &ret)
+	_, err := w.CallEndpoint("job/request", &req, &ret)
 	if err != nil {
 		if fuq.IsForbidden(err) && ntries < MaxRefreshTries {
 			ntries++
@@ -90,7 +90,7 @@ func (w *Endpoint) UpdateAndRequestAction(ctx context.Context, status fuq.JobSta
 
 	ret := []fuq.Task{}
 
-	if err := w.CallEndpoint("job/status", &req, &ret); err != nil {
+	if _, err := w.CallEndpoint("job/status", &req, &ret); err != nil {
 		return nil, err
 	}
 

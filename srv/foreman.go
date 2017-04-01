@@ -11,6 +11,9 @@ import (
 	"sync"
 )
 
+const ForemanCookie = `fuq_foreman_auth`
+const MaxCookieLength = 128
+
 type JobQueuer interface {
 	Close() error
 
@@ -155,6 +158,17 @@ func (f *Foreman) CheckClient(client fuq.Client) bool {
 	return f.Auth.CheckClient(client)
 }
 
+func (f *Foreman) addAuthCookie(resp http.ResponseWriter, cookie fuq.Cookie) {
+	respCookie := http.Cookie{
+		Name:     ForemanCookie,
+		Value:    string(cookie),
+		Path:     "/",
+		Secure:   true,
+		HttpOnly: true,
+	}
+	http.SetCookie(resp, &respCookie)
+}
+
 func (f *Foreman) HandleHello(resp http.ResponseWriter, req *http.Request) {
 	dec := json.NewDecoder(req.Body)
 	hello := fuq.Hello{}
@@ -183,6 +197,8 @@ func (f *Foreman) HandleHello(resp http.ResponseWriter, req *http.Request) {
 		fuq.BadRequest(resp, req)
 		return
 	}
+
+	f.addAuthCookie(resp, cookie)
 
 	ni, _ := f.Lookup(cookie)
 	ret := struct {
@@ -241,6 +257,8 @@ func (f *Foreman) HandleNodeReauth(resp http.ResponseWriter, req *http.Request) 
 		fuq.InternalError(resp, req)
 		return
 	}
+
+	f.addAuthCookie(resp, cookie)
 
 	RespondWithJSON(resp, &struct {
 		Name   string

@@ -426,7 +426,7 @@ type roundTrip struct {
 	Target string
 }
 
-func (rt roundTrip) TestHandler(fn func(http.ResponseWriter, *http.Request)) {
+func (rt roundTrip) TestHandler(fn func(http.ResponseWriter, *http.Request)) *http.Response {
 	t := rt.T
 
 	encode, err := json.Marshal(rt.Msg)
@@ -450,6 +450,8 @@ func (rt roundTrip) TestHandler(fn func(http.ResponseWriter, *http.Request)) {
 	if err := dec.Decode(rt.Dst); err != nil {
 		t.Fatalf("error unmarshaling response: %v", err)
 	}
+
+	return resp
 }
 
 func (rt roundTrip) TestClientHandler(fn func(http.ResponseWriter, *http.Request, []byte)) {
@@ -524,8 +526,8 @@ func (rt roundTrip) TestNodeHandler(fn func(http.ResponseWriter, *http.Request, 
 	}
 }
 
-func sendHello(t *testing.T, f *Foreman, hello fuq.Hello, envp *HelloResponseEnv) {
-	roundTrip{
+func sendHello(t *testing.T, f *Foreman, hello fuq.Hello, envp *HelloResponseEnv) *http.Response {
+	return roundTrip{
 		T:      t,
 		Msg:    &hello,
 		Dst:    envp,
@@ -563,6 +565,34 @@ func checkCookieInfo(t *testing.T, f *Foreman, cookie fuq.Cookie, ni fuq.NodeInf
 	}
 }
 
+func checkWebCookie(t *testing.T, cookie fuq.Cookie, resp *http.Response) {
+	webCookies := resp.Cookies()
+	if len(webCookies) == 0 {
+		t.Fatalf("no web cookies, but expected '%s' cookie to be set",
+			ForemanCookie)
+	}
+
+	for _, c := range webCookies {
+		switch {
+		case c.Name != ForemanCookie:
+			// ignore
+
+		case c.Value != string(cookie):
+			t.Logf("http cookies: %v", webCookies)
+			t.Fatalf("http cookie '%s' does not match json cookie '%s'",
+				c.Value, cookie)
+
+		case c.HttpOnly == false:
+			t.Fatalf("http cookie should HttpOnly attribute set")
+
+		default:
+			return
+		}
+	}
+
+	t.Fatalf("could not find Foreman cookie named '%s'", ForemanCookie)
+}
+
 func TestForemanHello(t *testing.T) {
 	f := newTestingForeman()
 
@@ -573,7 +603,7 @@ func TestForemanHello(t *testing.T) {
 	}
 
 	env := HelloResponseEnv{}
-	sendHello(t, f, hello, &env)
+	resp := sendHello(t, f, hello, &env)
 
 	if env.Name == nil || env.Cookie == nil {
 		t.Fatalf("response is incomplete: %#v", env)
@@ -583,6 +613,7 @@ func TestForemanHello(t *testing.T) {
 	cookie := *env.Cookie
 
 	checkCookieInfo(t, f, cookie, ni)
+	checkWebCookie(t, cookie, resp)
 }
 
 func TestForemanNodeReauth(t *testing.T) {
@@ -604,40 +635,41 @@ func TestForemanNodeReauth(t *testing.T) {
 		Msg:    &hello,
 	}
 
-	resp := HelloResponseEnv{}
-	roundTrip{
+	ret := HelloResponseEnv{}
+	resp := roundTrip{
 		T:      t,
 		Msg:    &reqEnv,
-		Dst:    &resp,
+		Dst:    &ret,
 		Target: "/node/reauth",
 	}.TestHandler(f.HandleNodeReauth)
 
-	if resp.Name == nil || resp.Cookie == nil {
+	if ret.Name == nil || ret.Cookie == nil {
 		t.Fatalf("reauth response is incomplete: %#v", env)
 	}
 
-	newCookie := *resp.Cookie
+	newCookie := *ret.Cookie
 	checkCookieInfo(t, f, newCookie, ni)
+	checkWebCookie(t, newCookie, resp)
 }
 
-func doNodeAuth(t *testing.T, f *Foreman) (fuq.NodeInfo, fuq.Cookie) {
+func doNodeAuth(t *testing.T, f *Foreman) (fuq.NodeInfo, fuq.Cookie, []*http.Cookie) {
 	ni := makeNodeInfo()
 	hello := fuq.Hello{
 		Auth:     "dummy_auth",
 		NodeInfo: ni,
 	}
 	env := HelloResponseEnv{}
-	sendHello(t, f, hello, &env)
+	resp := sendHello(t, f, hello, &env)
 
 	ni.UniqName = *env.Name
 	cookie := *env.Cookie
 
-	return ni, cookie
+	return ni, cookie, resp.Cookies()
 }
 
 func TestForemanNodeJobRequestAndUpdate(t *testing.T) {
 	f := newTestingForeman()
-	ni, cookie := doNodeAuth(t, f)
+	ni, cookie, _ := doNodeAuth(t, f)
 	_ = cookie
 
 	queue := f.JobQueuer.(*simpleQueuer)
@@ -766,6 +798,20 @@ func TestForemanNodeJobRequestAndUpdate(t *testing.T) {
 	}
 }
 
+/* Calls the client target to add a new job */
+func addJob(t *testing.T, f *Foreman, job fuq.JobDescription) fuq.JobId {
+	resp := fuq.NewJobResponse{}
+
+	roundTrip{
+		T:      t,
+		Msg:    &job,
+		Dst:    &resp,
+		Target: "/client/job/new",
+	}.TestClientHandler(f.HandleClientJobNew)
+
+	return resp.JobId
+}
+
 func TestForemanClientJobNew(t *testing.T) {
 	f := newTestingForeman()
 
@@ -777,24 +823,16 @@ func TestForemanClientJobNew(t *testing.T) {
 		Command:    "/foo/foo_it.sh",
 	}
 
-	resp := fuq.NewJobResponse{}
+	id := addJob(t, f, job0)
 
-	roundTrip{
-		T:      t,
-		Msg:    &job0,
-		Dst:    &resp,
-		Target: "/client/job/new",
-	}.TestClientHandler(f.HandleClientJobNew)
-	t.Logf("response is %v", resp)
-
-	job0.JobId = resp.JobId
+	job0.JobId = id
 	job0.Status = fuq.Waiting
 
 	queue := f.JobQueuer.(*simpleQueuer)
 
-	job, err := queue.FetchJobId(job0.JobId)
+	job, err := queue.FetchJobId(id)
 	if err != nil {
-		t.Fatalf("error fetching by with id '%d': %v", job0.JobId, err)
+		t.Fatalf("error fetching by with id '%d': %v", id, err)
 	}
 
 	if !reflect.DeepEqual(job, job0) {
@@ -823,14 +861,8 @@ func TestForemanClientJobList(t *testing.T) {
 	}
 
 	for i, j := range jobs {
-		resp := fuq.NewJobResponse{}
-		roundTrip{
-			T:      t,
-			Msg:    &j,
-			Dst:    &resp,
-			Target: "/client/job/new",
-		}.TestClientHandler(f.HandleClientJobNew)
-		jobs[i].JobId = resp.JobId
+		id := addJob(t, f, j)
+		jobs[i].JobId = id
 		jobs[i].Status = fuq.Waiting
 	}
 

@@ -4,6 +4,7 @@ import (
 	"github.com/sfstewman/fuq"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"sync"
 	"time"
@@ -65,9 +66,12 @@ func (wc *NodeConfig) NewCookie(ep *fuq.Endpoint) error {
 
 	log.Print("Calling HELLO endpoint")
 
-	if err := ep.CallEndpoint("hello", &hello, &ret); err != nil {
+	resp, err := ep.CallEndpoint("hello", &hello, &ret)
+	if err != nil {
 		return err
 	}
+
+	ep.AddResponseCookies(resp)
 
 	log.Printf("name is %s.  cookie is %s\n", wc.NodeInfo.UniqName, wc.cookie)
 
@@ -137,7 +141,8 @@ func (wc *NodeConfig) RefreshCookie(ep *fuq.Endpoint, oldCookie fuq.Cookie) erro
 		Cookie: &wc.cookie,
 	}
 
-	if err := ep.CallEndpoint("node/reauth", &req, &ret); err != nil {
+	resp, err := ep.CallEndpoint("node/reauth", &req, &ret)
+	if err != nil {
 		return err
 	}
 
@@ -145,6 +150,8 @@ func (wc *NodeConfig) RefreshCookie(ep *fuq.Endpoint, oldCookie fuq.Cookie) erro
 		log.Fatalf("invalid: cookie refresh changed unique name from %s to %s",
 			wc.NodeInfo.UniqName, name)
 	}
+
+	ep.AddResponseCookies(resp)
 
 	return nil
 }

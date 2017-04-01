@@ -7,6 +7,8 @@ import (
 	"golang.org/x/net/http2"
 	"log"
 	"net/http"
+	"net/http/cookiejar"
+	"net/url"
 	"os"
 )
 
@@ -96,6 +98,11 @@ func NewConversation(c Config) (*Endpoint, error) {
 }
 
 func makeEndpoint(c Config, configHTTP2 bool) (*Endpoint, error) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, fmt.Errorf("error setting up cookie jar: %v", err)
+	}
+
 	tlsConfig, err := SetupTLSRootCA(c)
 	if err != nil {
 		return nil, fmt.Errorf("error setting up tls config: %v", err)
@@ -115,6 +122,7 @@ func makeEndpoint(c Config, configHTTP2 bool) (*Endpoint, error) {
 
 	client := &http.Client{
 		Transport: transport,
+		Jar:       jar,
 	}
 
 	return &Endpoint{
@@ -123,7 +131,28 @@ func makeEndpoint(c Config, configHTTP2 bool) (*Endpoint, error) {
 	}, nil
 }
 
-func (e Endpoint) SendMessage(endpoint string, mesg interface{}) (*http.Response, error) {
+func (e *Endpoint) AddCookies(rawURL string, cookies []*http.Cookie) error {
+	url, err := url.Parse(rawURL)
+	if err != nil {
+		return err
+	}
+
+	e.Client.Jar.SetCookies(url, cookies)
+	return nil
+}
+
+func (e *Endpoint) AddResponseCookies(resp *http.Response) error {
+	cookies := resp.Cookies()
+	if len(cookies) == 0 {
+		return nil
+	}
+
+	url := resp.Request.URL
+	e.Client.Jar.SetCookies(url, cookies)
+	return nil
+}
+
+func (e *Endpoint) SendMessage(endpoint string, mesg interface{}) (*http.Response, error) {
 	url := e.Config.EndpointURL(endpoint)
 	// log.Printf("calling endpoint '%s' at %s", endpoint, url)
 	data, err := json.Marshal(mesg)
@@ -142,23 +171,23 @@ func (e Endpoint) SendMessage(endpoint string, mesg interface{}) (*http.Response
 	return resp, nil
 }
 
-func (e Endpoint) CallEndpoint(endpoint string, mesg, result interface{}) error {
+func (e *Endpoint) CallEndpoint(endpoint string, mesg, result interface{}) (*http.Response, error) {
 	resp, err := e.SendMessage(endpoint, mesg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return WithStatus(resp)
+		return nil, WithStatus(resp)
 	}
 
 	if result != nil {
 		dec := json.NewDecoder(resp.Body)
 		if err := dec.Decode(result); err != nil {
-			return fmt.Errorf("error decoding response from '%s': %v", endpoint, err)
+			return nil, fmt.Errorf("error decoding response from '%s': %v", endpoint, err)
 		}
 	}
 
-	return nil
+	return resp, nil
 }
