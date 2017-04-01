@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+const ErrorChannelTimeout = 1 * time.Second
+
 type MessageHandler interface {
 	Handle(msg Message) (response Message)
 }
@@ -100,23 +102,46 @@ func (mc *Conn) OnMessageFunc(mt MType, f MessageHandlerFunc) {
 	mc.OnMessage(mt, f)
 }
 
+func (mc *Conn) sendError(ctx context.Context, errorCh chan<- reply, r reply) {
+	// if the context is canceled, don't send an error
+	if ctx.Err() != nil {
+		return
+	}
+
+	errCtx, _ := context.WithTimeout(ctx, ErrorChannelTimeout)
+	// check done channel before setting error
+	select {
+	case <-errCtx.Done():
+		goto canceled
+
+	case errorCh <- r:
+		return
+	}
+
+canceled:
+	switch err := errCtx.Err(); err {
+	case context.Canceled:
+		return
+
+	case context.DeadlineExceeded:
+		// If we can't send a reply over the error channel, it
+		// either indicates that the conversation loop is
+		// blocked or that the conversation loop was canceled
+		// but the incoming loop was not.
+		//
+		// Both are programming errors, so we panic.
+		panic(fmt.Sprintf("could not send reply %v", err))
+
+	default:
+		panic(fmt.Sprintf("invalid context error: %v", err))
+	}
+}
+
 func (mc *Conn) incomingLoop(ctx context.Context, msgCh chan<- Message, errorCh chan<- reply) {
 	defer close(msgCh)
-	defer func() {
-		if r := recover(); r != nil {
-			m := reply{E: fmt.Errorf("recovered panic %v", r)}
-			select {
-			case errorCh <- m:
-			default:
-				panic(r)
-			}
-		}
-	}()
-	// defer log.Printf("--[ mc(%p) incoming loop stopping ]--", mc)
 
+	done := ctx.Done()
 	for {
-		done := ctx.Done()
-
 		// check done channel before we receive a message
 		select {
 		case <-done:
@@ -130,24 +155,8 @@ func (mc *Conn) incomingLoop(ctx context.Context, msgCh chan<- Message, errorCh 
 		mc.updateSeq(msg.Seq)
 
 		if err != nil {
-
-			select {
-			case <-done:
-				// ignore error
-				return
-			default:
-				/* report error */
-			}
-
-			// check done channel before setting error
-			log.Printf("error in incoming loop: %#v", err)
-			select {
-			case <-done:
-			case errorCh <- reply{msg, err}:
-			default:
-				panic(err) // XXX - is there a better way?
-			}
-			return
+			log.Printf("error in incoming loop: %v", err)
+			mc.sendError(ctx, errorCh, reply{msg, err})
 		}
 
 		select {
