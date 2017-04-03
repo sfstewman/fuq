@@ -4,7 +4,6 @@ import (
 	"github.com/sfstewman/fuq"
 	"log"
 	"net"
-	"net/http"
 	"net/url"
 	"sync"
 	"time"

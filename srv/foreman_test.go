@@ -1,18 +1,24 @@
 package srv
 
 import (
-	// "context"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/gorilla/websocket"
 	"github.com/sfstewman/fuq"
+	"github.com/sfstewman/fuq/proto"
+	fuqws "github.com/sfstewman/fuq/websocket"
 	"math/rand"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"sort"
 	"sync"
 	"testing"
+	"time"
 	// "log"
 )
 
@@ -575,7 +581,7 @@ func checkWebCookie(t *testing.T, cookie fuq.Cookie, resp *http.Response) {
 	for _, c := range webCookies {
 		switch {
 		case c.Name != ForemanCookie:
-			// ignore
+			continue
 
 		case c.Value != string(cookie):
 			t.Logf("http cookies: %v", webCookies)
@@ -586,6 +592,15 @@ func checkWebCookie(t *testing.T, cookie fuq.Cookie, resp *http.Response) {
 			t.Fatalf("http cookie should HttpOnly attribute set")
 
 		default:
+			// make sure that it was issued as expiring
+			// later
+			if now := time.Now(); now.After(c.Expires) {
+				t.Fatalf("cookie should not be expired: now=%s, expires=%s",
+					now, c.Expires)
+			}
+
+			t.Logf("cookie is good, expiry is %v", c.Expires)
+
 			return
 		}
 	}
@@ -652,7 +667,7 @@ func TestForemanNodeReauth(t *testing.T) {
 	checkWebCookie(t, newCookie, resp)
 }
 
-func doNodeAuth(t *testing.T, f *Foreman) (fuq.NodeInfo, fuq.Cookie, []*http.Cookie) {
+func doNodeAuth(t *testing.T, f *Foreman) (fuq.NodeInfo, fuq.Cookie, *http.Response) {
 	ni := makeNodeInfo()
 	hello := fuq.Hello{
 		Auth:     "dummy_auth",
@@ -664,7 +679,7 @@ func doNodeAuth(t *testing.T, f *Foreman) (fuq.NodeInfo, fuq.Cookie, []*http.Coo
 	ni.UniqName = *env.Name
 	cookie := *env.Cookie
 
-	return ni, cookie, resp.Cookies()
+	return ni, cookie, resp
 }
 
 func TestForemanNodeJobRequestAndUpdate(t *testing.T) {
@@ -1053,5 +1068,323 @@ func TestForemanClientJobList(t *testing.T) {
 	if !reflect.DeepEqual(resp, expectedResp) {
 		t.Fatalf("expected response '%#v', but found '%#v'",
 			expectedResp, resp)
+	}
+}
+
+/* TODO:
+ *
+ * 1) persistent node connection
+ *
+ * 2) client job state changes
+ * 3) client job clear
+ * 4) client shutdown
+ *
+ * 5) Refactor tests to eliminate a bunch of the redundancy
+ *
+ * 6) Also, end-to-end testing with workers and a fake runner.
+ */
+
+func newTestClient(t *testing.T, f *Foreman) (*websocket.Conn, *proto.Conn) {
+	ni, _, resp := doNodeAuth(t, f)
+	_ = ni
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("error allocating cookie jar: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(f.HandleNodePersistent))
+	defer server.Close()
+
+	url, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("error parsing server URL: %s", server.URL)
+	}
+	jar.SetCookies(url, resp.Cookies())
+
+	dialer := websocket.Dialer{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		Jar:             jar,
+	}
+
+	url.Scheme = "ws"
+	wsConn, _, err := dialer.Dial(url.String(), nil)
+	if err != nil {
+		t.Fatalf("error in establishing websocket connection: %v", err)
+	}
+
+	client := proto.NewConn(proto.Opts{
+		Messenger: fuqws.Messenger{
+			C:       wsConn,
+			Timeout: 60 * time.Second,
+		},
+		Worker: true,
+	})
+
+	return wsConn, client
+}
+
+func TestForemanNodeOnHello(t *testing.T) {
+	f := newTestingForeman()
+
+	wsConn, client := newTestClient(t, f)
+	defer wsConn.Close()
+	defer client.Close()
+
+	queue := f.JobQueuer.(*simpleQueuer)
+	id, err := queue.AddJob(fuq.JobDescription{
+		Name:       "job1",
+		NumTasks:   8,
+		WorkingDir: "/foo/bar",
+		LoggingDir: "/foo/bar/logs",
+		Command:    "/foo/foo_it.sh",
+	})
+
+	_, _ = id, err
+
+	taskCh := make(chan []fuq.Task)
+
+	var nproc, nrun uint16 = 7, 0
+	client.OnMessageFunc(proto.MTypeJob, func(msg proto.Message) proto.Message {
+		taskPtr := msg.Data.(*[]fuq.Task)
+		tasks := *taskPtr
+		t.Logf("%d tasks: %v", len(tasks), tasks)
+		nproc -= uint16(len(tasks))
+		nrun += uint16(len(tasks))
+
+		if nproc < 0 {
+			panic("invalid number of tasks")
+		}
+
+		repl := proto.OkayMessage(nproc, nrun, msg.Seq)
+		taskCh <- tasks
+		return repl
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go client.ConversationLoop(ctx)
+
+	msg, err := client.SendHello(ctx, proto.HelloData{
+		NumProcs: 7,
+		Running:  nil,
+	})
+
+	if err != nil {
+		t.Fatalf("error in HELLO: %v", err)
+	}
+
+	if msg.Type != proto.MTypeOK {
+		t.Fatalf("expected OK reply, but received %v", msg)
+	}
+
+	np, nr := msg.AsOkay()
+	if np != 7 && nr != 0 {
+		t.Fatalf("expected OK(7|0), but received OK(%d|%d)", nproc, nrun)
+	}
+
+	// The foreman should dispatch nproc tasks
+	tasks := <-taskCh
+	if len(tasks) != 7 {
+		t.Fatalf("expected 7 tasks to be queued")
+	}
+
+	if nproc != 0 && nrun != 7 {
+		t.Fatalf("expected nproc=%d and nrun=%d, but found nproc=%d and nrun=%d",
+			0, 7, nproc, nrun)
+	}
+}
+
+func TestForemanNodeOnUpdate(t *testing.T) {
+	f := newTestingForeman()
+
+	wsConn, client := newTestClient(t, f)
+	defer wsConn.Close()
+	defer client.Close()
+
+	queue := f.JobQueuer.(*simpleQueuer)
+	id, err := queue.AddJob(fuq.JobDescription{
+		Name:       "job1",
+		NumTasks:   8,
+		WorkingDir: "/foo/bar",
+		LoggingDir: "/foo/bar/logs",
+		Command:    "/foo/foo_it.sh",
+	})
+
+	_, _ = id, err
+
+	taskCh := make(chan []fuq.Task)
+
+	var nproc, nrun uint16 = 7, 0
+	client.OnMessageFunc(proto.MTypeJob, func(msg proto.Message) proto.Message {
+		taskPtr := msg.Data.(*[]fuq.Task)
+		tasks := *taskPtr
+		t.Logf("%d tasks: %v", len(tasks), tasks)
+		nproc -= uint16(len(tasks))
+		nrun += uint16(len(tasks))
+
+		if nproc < 0 {
+			panic("invalid number of tasks")
+		}
+
+		repl := proto.OkayMessage(nproc, nrun, msg.Seq)
+		taskCh <- tasks
+		return repl
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go client.ConversationLoop(ctx)
+
+	msg, err := client.SendHello(ctx, proto.HelloData{
+		NumProcs: 7,
+		Running:  nil,
+	})
+
+	if err != nil {
+		t.Fatalf("error in HELLO: %v", err)
+	}
+
+	if msg.Type != proto.MTypeOK {
+		t.Fatalf("expected OK reply, but received %v", msg)
+	}
+
+	np, nr := msg.AsOkay()
+	if np != 7 || nr != 0 {
+		t.Fatalf("expected OK(7|0), but received OK(%d|%d)", nproc, nrun)
+	}
+
+	// The foreman should dispatch nproc tasks
+	tasks := <-taskCh
+	if len(tasks) != 7 {
+		t.Fatalf("expected 7 tasks to be queued")
+	}
+
+	if nproc != 0 && nrun != 7 {
+		t.Fatalf("expected nproc=%d and nrun=%d, but found nproc=%d and nrun=%d",
+			0, 7, nproc, nrun)
+	}
+
+	msg, err = client.SendUpdate(ctx, fuq.JobStatusUpdate{
+		JobId:   tasks[3].JobId,
+		Task:    tasks[3].Task,
+		Success: true,
+		Status:  "done",
+	})
+
+	if err != nil {
+		t.Fatalf("error sending job update: %v", err)
+	}
+
+	if msg.Type != proto.MTypeOK {
+		t.Fatalf("expected OK(1|6), but message is %v", msg)
+	}
+
+	np, nr = msg.AsOkay()
+	if np != 1 || nr != 6 {
+		t.Fatalf("expected OK(1|6), received OK(%d|%d)", np, nr)
+	}
+
+	tasks = <-taskCh
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 new task to be queued, received %v", tasks)
+	}
+}
+
+func TestPConnNodeNewJobsQueued(t *testing.T) {
+	f := newTestingForeman()
+	queue := f.JobQueuer.(*simpleQueuer)
+
+	wsConn, client := newTestClient(t, f)
+	defer wsConn.Close()
+	defer client.Close()
+
+	taskCh := make(chan []fuq.Task)
+
+	var nproc, nrun uint16 = 8, 0
+	client.OnMessageFunc(proto.MTypeJob, func(msg proto.Message) proto.Message {
+		taskPtr := msg.Data.(*[]fuq.Task)
+		tasks := *taskPtr
+
+		t.Logf("onJob received %d tasks: %v", len(tasks), tasks)
+		nproc -= uint16(len(tasks))
+		nrun += uint16(len(tasks))
+
+		if nproc < 0 {
+			panic("invalid number of tasks")
+		}
+
+		repl := proto.OkayMessage(nproc, nrun, msg.Seq)
+		taskCh <- tasks
+		return repl
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go client.ConversationLoop(ctx)
+
+	msg, err := client.SendHello(ctx, proto.HelloData{
+		NumProcs: 8,
+		Running:  nil,
+	})
+
+	if err != nil {
+		t.Fatalf("error in HELLO: %v", err)
+	}
+
+	if msg.Type != proto.MTypeOK {
+		t.Fatalf("expected OK reply, but received %v", msg)
+	}
+
+	np, nr := msg.AsOkay()
+	if np != 8 || nr != 0 {
+		t.Fatalf("expected OK(7|0), but received OK(%d|%d)", nproc, nrun)
+	}
+
+	syncCh := make(chan struct{})
+	go func(q JobQueuer, signal chan struct{}) {
+		_, err := q.AddJob(fuq.JobDescription{
+			Name:       "job1",
+			NumTasks:   8,
+			WorkingDir: "/foo/bar",
+			LoggingDir: "/foo/bar/logs",
+			Command:    "/foo/foo_it.sh",
+		})
+
+		if err != nil {
+			panic(fmt.Sprintf("error adding job: %v", err))
+		}
+
+		close(signal)
+		f.WakeupListeners()
+	}(queue, syncCh)
+
+	order := make([]int, 0, 2)
+	var tasks []fuq.Task
+	for len(order) < 2 {
+		select {
+		case _, ok := <-syncCh:
+			order = append(order, 1)
+			if !ok {
+				syncCh = nil
+			}
+
+		case tasks = <-taskCh:
+			order = append(order, 2)
+		}
+	}
+
+	if order[0] != 1 || order[1] != 2 {
+		t.Fatalf("sequence 1,2 expected, but found %v", order)
+	}
+
+	if len(tasks) != 8 {
+		t.Fatalf("expected 8 tasks to be queued")
+	}
+
+	if nproc != 0 && nrun != 8 {
+		t.Fatalf("expected nproc=%d and nrun=%d, but found nproc=%d and nrun=%d",
+			0, 8, nproc, nrun)
 	}
 }

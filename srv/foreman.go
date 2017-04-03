@@ -4,14 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/gorilla/websocket"
 	"github.com/sfstewman/fuq"
+	"github.com/sfstewman/fuq/proto"
+	fuqws "github.com/sfstewman/fuq/websocket"
 	"log"
 	"net/http"
 	"os"
 	"sync"
+	"time"
 )
 
 const ForemanCookie = `fuq_foreman_auth`
+const ForemanCookieAge = 14 * 24 * time.Hour
 const MaxCookieLength = 128
 
 type JobQueuer interface {
@@ -160,10 +165,11 @@ func (f *Foreman) CheckClient(client fuq.Client) bool {
 
 func (f *Foreman) addAuthCookie(resp http.ResponseWriter, cookie fuq.Cookie) {
 	respCookie := http.Cookie{
-		Name:     ForemanCookie,
-		Value:    string(cookie),
-		Path:     "/",
-		Secure:   true,
+		Name:    ForemanCookie,
+		Value:   string(cookie),
+		Expires: time.Now().Add(ForemanCookieAge),
+		Path:    "/",
+		// Secure:   true,
 		HttpOnly: true,
 	}
 	http.SetCookie(resp, &respCookie)
@@ -398,30 +404,260 @@ func (f *Foreman) http2Convo(resp http.ResponseWriter, req *http.Request, ni fuq
 }
 */
 
-func (f *Foreman) websocketConvo(hj http.Hijacker, req *http.Request, ni fuq.NodeInfo) error {
-	conn, bufrw, err := hj.Hijack()
-	_ = bufrw
+// TODO: need tests to check failure cases
+func (f *Foreman) checkCookie(resp http.ResponseWriter, req *http.Request) bool {
+	cookie, err := req.Cookie(ForemanCookie)
+	if err != nil {
+		log.Printf("%s: missing session cookie (cookies = %v)",
+			req.RemoteAddr, req.Cookies())
+		http.Error(resp, "missing session cookie", http.StatusUnauthorized)
+		return false
+	}
+
+	cookieData := fuq.Cookie(cookie.Value)
+	if len(cookieData) > MaxCookieLength {
+		log.Printf("%s: cookie is too long (%d bytes)", req.RemoteAddr, len(cookieData))
+		http.Error(resp, "cannot validate cookie", http.StatusUnauthorized)
+		return false
+	}
+
+	ni, err := f.Lookup(cookieData)
+	if err != nil {
+		log.Printf("%s: error looking up cookie: %v", req.RemoteAddr, err)
+		http.Error(resp, "cannot validate cookie", http.StatusUnauthorized)
+		return false
+	}
+
+	if ni.Node == "" {
+		log.Printf("%s: cookie '%s' not found", req.RemoteAddr, cookieData)
+		http.Error(resp, "cannot validate cookie", http.StatusForbidden)
+		return false
+	}
+
+	log.Printf("%s: cookie %s from node %v", req.RemoteAddr, cookieData, ni)
+
+	return true
+}
+
+type persistentConn struct {
+	mu sync.Mutex
+
+	W *websocket.Conn
+	C *proto.Conn
+	F *Foreman
+
+	ready       chan struct{}
+	helloSignal chan struct{}
+
+	nproc, nrun uint16
+}
+
+func newPersistentConn(f *Foreman, conn *websocket.Conn) *persistentConn {
+	messenger := fuqws.Messenger{C: conn, Timeout: 5 * time.Second}
+
+	pconn := proto.NewConn(proto.Opts{
+		Messenger: messenger,
+		Flusher:   proto.NopFlusher{},
+		Worker:    false,
+	})
+
+	pc := &persistentConn{
+		W:           conn,
+		C:           pconn,
+		F:           f,
+		helloSignal: make(chan struct{}),
+	}
+
+	pconn.OnMessageFunc(proto.MTypeHello, pc.onHello)
+	pconn.OnMessageFunc(proto.MTypeUpdate, pc.onUpdate)
+
+	return pc
+}
+
+func (pc *persistentConn) onHello(msg proto.Message) proto.Message {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+
+	hello := msg.Data.(*proto.HelloData)
+
+	// XXX - should record running tasks
+
+	// XXX - check for overflow!
+	pc.nproc = uint16(hello.NumProcs)
+	pc.nrun = uint16(len(hello.Running))
+	pc.ready = nil
+
+	close(pc.helloSignal)
+
+	return proto.OkayMessage(pc.nproc, pc.nrun, msg.Seq)
+}
+
+func (pc *persistentConn) onUpdate(msg proto.Message) proto.Message {
+	// XXX - record job status
+
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+
+	// XXX - check for overflow/underflow
+	pc.nproc++
+	pc.nrun--
+
+	log.Printf("onUpdate: nproc=%d, nrun=%d", pc.nproc, pc.nrun)
+
+	fmt.Fprintf(os.Stderr, "pconn(%p): UPDATE received\n", pc)
+	if pc.ready != nil {
+		fmt.Fprintf(os.Stderr, "  -- signaling READY\n")
+		close(pc.ready)
+		pc.ready = nil
+	}
+
+	fmt.Fprintf(os.Stderr, " -- WAKEUP\n")
+	pc.F.WakeupListeners()
+	return proto.OkayMessage(pc.nproc, pc.nrun, msg.Seq)
+}
+
+func (pc *persistentConn) waitOnWorkers(ctx context.Context) (int, error) {
+	for {
+		pc.mu.Lock()
+
+		nproc := int(pc.nproc)
+		if nproc > 0 {
+			pc.mu.Unlock()
+			return nproc, nil
+		}
+
+		if pc.ready == nil {
+			pc.ready = make(chan struct{})
+		}
+		ready := pc.ready
+
+		pc.mu.Unlock()
+
+		select {
+		case <-ready:
+			continue
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+	}
+}
+
+func (pc *persistentConn) sendJobs(ctx context.Context, tasks []fuq.Task) error {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+
+	resp, err := pc.C.SendJob(ctx, tasks)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+
+	if resp.Type != proto.MTypeOK {
+		return fmt.Errorf("error in reply: %v", resp)
+	}
+
+	np, nr := resp.AsOkay()
+
+	pc.nproc, pc.nrun = np, nr
+	log.Printf("sentJobs: nproc=%d, nrun=%d", pc.nproc, pc.nrun)
 	return nil
 }
 
-func (f *Foreman) HandleNodeConversation(resp http.ResponseWriter, req *http.Request, ni fuq.NodeInfo) {
+func (pc *persistentConn) Loop(ctx context.Context) error {
+	go pc.C.ConversationLoop(ctx)
+
+	startSignal := pc.helloSignal
+	select {
+	case <-startSignal:
+		/* nop */
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	f := pc.F
+
+	for {
+		nproc, err := pc.waitOnWorkers(ctx)
+
+		if err != nil {
+			return err
+		}
+
+		f.jobsSignal.mu.Lock()
+
+		// request jobs
+		tasks, err := f.FetchPendingTasks(nproc)
+		if err != nil {
+			f.jobsSignal.mu.Unlock()
+			log.Printf("error fetching tasks: %v", err)
+			return err
+		}
+
+		if len(tasks) == 0 {
+			jobsAvail := f.ready(false)
+			f.jobsSignal.mu.Unlock()
+
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-jobsAvail:
+				continue
+			}
+		}
+
+		f.jobsSignal.mu.Unlock()
+
+		if err := pc.sendJobs(ctx, tasks); err != nil {
+			log.Printf("error sending tasks: %v", err)
+			return err
+		}
+
+		// XXX - update running list
+		log.Printf("%s: queued %d tasks",
+			pc.W.RemoteAddr(), len(tasks))
+	}
+}
+
+func (f *Foreman) HandleNodePersistent(resp http.ResponseWriter, req *http.Request) {
+	log.Printf("-- HandleNodePersistent --")
 	if req.Proto == "HTTP/2.0" {
 		http.Error(resp, "http/2 support not implemented", http.StatusNotImplemented)
 		return
 	}
 
-	if hj, ok := resp.(http.Hijacker); ok {
-		if err := f.websocketConvo(hj, req, ni); err != nil {
-			http.Error(resp, err.Error(), http.StatusInternalServerError)
-		}
+	log.Print("  . Checking cookie")
+	// XXX - check that this fails on no/bad cookie in tests
+	if !f.checkCookie(resp, req) {
+		log.Printf("%s: invalid cookie", req.RemoteAddr)
 		return
 	}
 
-	http.Error(resp, "requires http/2 or websocket support", http.StatusInternalServerError)
+	upgrader := websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+	}
+
+	log.Print("  . Upgrading to websocket")
+	conn, err := upgrader.Upgrade(resp, req, nil)
+	if err != nil {
+		log.Printf("%s: error upgrading connection: %v",
+			req.RemoteAddr, err)
+		return
+	}
+	defer conn.Close()
+
+	// spin up a persistent connection...
+
+	log.Print("  . Spinning up consistent connection")
+	ctx := req.Context()
+	pc := newPersistentConn(f, conn)
+
+	err = pc.Loop(ctx)
+
+	if err != nil {
+		log.Printf("%s connection error: %v", req.RemoteAddr, err)
+	} else {
+		log.Printf("%s connection finished", req.RemoteAddr)
+	}
 }
 
 func (f *Foreman) HandleClientNodeList(resp http.ResponseWriter, req *http.Request, mesg []byte) {
