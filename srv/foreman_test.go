@@ -1286,9 +1286,32 @@ func TestForemanNodeOnUpdate(t *testing.T) {
 		t.Fatalf("expected OK(1|6), received OK(%d|%d)", np, nr)
 	}
 
-	tasks = <-taskCh
-	if len(tasks) != 1 {
+	tasks1 := <-taskCh
+	if len(tasks1) != 1 {
 		t.Fatalf("expected 1 new task to be queued, received %v", tasks)
+	}
+
+	// check that updated task is marked as no longer running
+	taskStatus, err := queue.FetchJobTaskStatus(tasks[3].JobId)
+	if err != nil {
+		t.Fatalf("error when fetching job task status")
+	}
+
+	desc := tasks[3].JobDescription
+	desc.Status = fuq.Running
+
+	expectedStatus := fuq.JobTaskStatus{
+		Description:     desc,
+		TasksFinished:   1,
+		TasksPending:    0,
+		TasksRunning:    []int{1, 2, 3, 5, 6, 7, 8},
+		TasksWithErrors: []int{},
+	}
+
+	if !reflect.DeepEqual(taskStatus, expectedStatus) {
+		t.Log("task status may not be updated")
+		t.Fatalf("expected taskStatus='%v', but found '%v'",
+			expectedStatus, taskStatus)
 	}
 }
 

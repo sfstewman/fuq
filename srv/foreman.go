@@ -145,6 +145,20 @@ func NewForeman(opts ForemanOpts) (*Foreman, error) {
 	return &f, nil
 }
 
+func (f *Foreman) AllShutdownNodes() []string {
+	f.shutdownReq.mu.RLock()
+	defer f.shutdownReq.mu.RUnlock()
+
+	nodes := make([]string, len(f.shutdownReq.shutdownHost))
+	count := 0
+	for h, _ := range f.shutdownReq.shutdownHost {
+		nodes[count] = h
+		count++
+	}
+
+	return nodes[:count]
+}
+
 func (f *Foreman) IsNodeShutdown(name string) bool {
 	f.shutdownReq.mu.RLock()
 	defer f.shutdownReq.mu.RUnlock()
@@ -153,6 +167,15 @@ func (f *Foreman) IsNodeShutdown(name string) bool {
 	log.Printf("checking if node %s has a shutdown request: %v",
 		name, ok)
 	return ok
+}
+
+func (f *Foreman) ShutdownNodes(names []string) {
+	f.shutdownReq.mu.Lock()
+	defer f.shutdownReq.mu.Unlock()
+
+	for _, n := range names {
+		f.shutdownReq.shutdownHost[n] = struct{}{}
+	}
 }
 
 func (f *Foreman) CheckAuth(cred string) bool {
@@ -492,13 +515,29 @@ func (pc *persistentConn) onHello(msg proto.Message) proto.Message {
 	return proto.OkayMessage(pc.nproc, pc.nrun, msg.Seq)
 }
 
-func (pc *persistentConn) onUpdate(msg proto.Message) proto.Message {
-	// XXX - record job status
+// for uint16 overflow detection
+const MaxUint16 uint16 = ^uint16(0)
 
+func (pc *persistentConn) onUpdate(msg proto.Message) proto.Message {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 
-	// XXX - check for overflow/underflow
+	updPtr := msg.Data.(*fuq.JobStatusUpdate)
+
+	if err := pc.F.UpdateTaskStatus(*updPtr); err != nil {
+		log.Printf("error updating task status (update=%v): %v",
+			*updPtr, err)
+	}
+
+	// check for overflow/underflow
+	switch {
+	case pc.nproc == MaxUint16:
+		panic(fmt.Sprintf("nproc will overflow (currently %d)", pc.nproc))
+	case pc.nrun == 0:
+		panic(fmt.Sprintf("nrun will underflow (currently %d)", pc.nrun))
+	}
+
+	// TODO - jobs that occupy more than one core
 	pc.nproc++
 	pc.nrun--
 
@@ -686,12 +725,10 @@ func (f *Foreman) HandleClientNodeShutdown(resp http.ResponseWriter, req *http.R
 	log.Printf("shutdown: received message: %s", mesg)
 	log.Printf("shutdown: unmarshalled: %s", msg)
 
-	f.shutdownReq.mu.Lock()
-	defer f.shutdownReq.mu.Unlock()
 	for _, n := range msg.UniqNames {
 		log.Printf("shutdown request for node '%s'", n)
-		f.shutdownReq.shutdownHost[n] = struct{}{}
 	}
+	f.ShutdownNodes(msg.UniqNames)
 
 	// wakeup all listeners so anything we want to shut down won't
 	// keep waiting until a job is queued...

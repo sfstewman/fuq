@@ -12,7 +12,6 @@ import (
 	"net"
 	"os"
 	"reflect"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -229,19 +228,6 @@ func (t *testConn) Close() {
 	callCloseIfNonNil(t.pforeman)
 }
 
-// goPanicOnError Starts a goroutine that will panic if f returns a
-// non-nil error value
-func goPanicOnError(ctx context.Context, f func(context.Context) error) {
-	trace := make([]byte, 2048)
-	n := runtime.Stack(trace, false)
-	trace = trace[:n]
-	go func() {
-		if err := f(ctx); err != nil {
-			panic(fmt.Sprintf("%s\n\nconversation loop error: %v", trace, err))
-		}
-	}()
-}
-
 func runTestsWithRig(mk testRigMaker, t *testing.T) {
 	t.Run("OnMessage", testWithRig(mk, OnMessageTest))
 	t.Run("SendJob", testWithRig(mk, SendJobTest))
@@ -279,8 +265,8 @@ func OnMessageTest(tc connTestRigger, t *testing.T) {
 	})
 
 	ctx := tc.Context()
-	goPanicOnError(ctx, mcw.ConversationLoop)
-	goPanicOnError(ctx, mcf.ConversationLoop)
+	fuqtest.GoPanicOnError(ctx, mcw.ConversationLoop)
+	fuqtest.GoPanicOnError(ctx, mcf.ConversationLoop)
 
 	job := fuq.Task{Task: 23, JobDescription: fuq.JobDescription{JobId: fuq.JobId(7)}}
 
@@ -339,8 +325,8 @@ func SendJobTest(tc connTestRigger, t *testing.T) {
 	})
 
 	ctx := tc.Context()
-	goPanicOnError(ctx, mcw.ConversationLoop)
-	goPanicOnError(ctx, mcf.ConversationLoop)
+	fuqtest.GoPanicOnError(ctx, mcw.ConversationLoop)
+	fuqtest.GoPanicOnError(ctx, mcf.ConversationLoop)
 
 	tsend := []fuq.Task{
 		fuq.Task{
@@ -390,8 +376,8 @@ func SendUpdateTest(tc connTestRigger, t *testing.T) {
 	})
 
 	ctx := tc.Context()
-	goPanicOnError(ctx, mcw.ConversationLoop)
-	goPanicOnError(ctx, mcf.ConversationLoop)
+	fuqtest.GoPanicOnError(ctx, mcw.ConversationLoop)
+	fuqtest.GoPanicOnError(ctx, mcf.ConversationLoop)
 
 	usend := fuq.JobStatusUpdate{
 		JobId:   fuq.JobId(7),
@@ -436,8 +422,8 @@ func SendStopTest(tc connTestRigger, t *testing.T) {
 	})
 
 	ctx := tc.Context()
-	goPanicOnError(ctx, mcw.ConversationLoop)
-	goPanicOnError(ctx, mcf.ConversationLoop)
+	fuqtest.GoPanicOnError(ctx, mcw.ConversationLoop)
+	fuqtest.GoPanicOnError(ctx, mcf.ConversationLoop)
 
 	resp, err := mcf.SendStop(ctx, 3)
 	if err != nil {
@@ -471,8 +457,8 @@ func SendHelloTest(tc connTestRigger, t *testing.T) {
 	})
 
 	ctx := tc.Context()
-	goPanicOnError(ctx, mcw.ConversationLoop)
-	goPanicOnError(ctx, mcf.ConversationLoop)
+	fuqtest.GoPanicOnError(ctx, mcw.ConversationLoop)
+	fuqtest.GoPanicOnError(ctx, mcf.ConversationLoop)
 
 	hello := proto.HelloData{NumProcs: 11}
 	resp, err := mcw.SendHello(ctx, hello)
@@ -522,8 +508,8 @@ func SecondSendBlocksUntilReplyTest(tc connTestRigger, t *testing.T) {
 	})
 
 	ctx := tc.Context()
-	goPanicOnError(ctx, mcw.ConversationLoop)
-	goPanicOnError(ctx, mcf.ConversationLoop)
+	fuqtest.GoPanicOnError(ctx, mcw.ConversationLoop)
+	fuqtest.GoPanicOnError(ctx, mcf.ConversationLoop)
 
 	// first send
 	go func() {
@@ -631,8 +617,8 @@ func HoldMessageUntilReplyTest(tc connTestRigger, t *testing.T) {
 	})
 
 	ctx := tc.Context()
-	goPanicOnError(ctx, mcw.ConversationLoop)
-	goPanicOnError(ctx, mcf.ConversationLoop)
+	fuqtest.GoPanicOnError(ctx, mcw.ConversationLoop)
+	fuqtest.GoPanicOnError(ctx, mcf.ConversationLoop)
 
 	job := fuq.Task{
 		Task:           23,
@@ -757,8 +743,8 @@ func SequencesAreIncreasingTest(tc connTestRigger, t *testing.T) {
 	})
 
 	ctx := tc.Context()
-	goPanicOnError(ctx, mcw.ConversationLoop)
-	goPanicOnError(ctx, mcf.ConversationLoop)
+	fuqtest.GoPanicOnError(ctx, mcw.ConversationLoop)
+	fuqtest.GoPanicOnError(ctx, mcf.ConversationLoop)
 
 	for i := 23; i <= 25; i++ {
 		task := fuq.Task{
