@@ -4,10 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/gorilla/websocket"
 	"github.com/sfstewman/fuq"
 	"github.com/sfstewman/fuq/proto"
-	fuqws "github.com/sfstewman/fuq/websocket"
+	"github.com/sfstewman/fuq/websocket"
 	"log"
 	"net/http"
 	"os"
@@ -465,7 +464,7 @@ func (f *Foreman) checkCookie(resp http.ResponseWriter, req *http.Request) *fuq.
 type persistentConn struct {
 	mu sync.Mutex
 
-	W *websocket.Conn
+	M *websocket.Messenger
 	C *proto.Conn
 	F *Foreman
 
@@ -478,9 +477,7 @@ type persistentConn struct {
 	nproc, nrun, nstop uint16
 }
 
-func newPersistentConn(f *Foreman, ni fuq.NodeInfo, conn *websocket.Conn) *persistentConn {
-	messenger := &fuqws.Messenger{C: conn, Timeout: 5 * time.Second}
-
+func newPersistentConn(f *Foreman, ni fuq.NodeInfo, messenger *websocket.Messenger) *persistentConn {
 	pconn := proto.NewConn(proto.Opts{
 		Messenger: messenger,
 		Flusher:   proto.NopFlusher{},
@@ -488,7 +485,7 @@ func newPersistentConn(f *Foreman, ni fuq.NodeInfo, conn *websocket.Conn) *persi
 	})
 
 	pc := &persistentConn{
-		W:           conn,
+		M:           messenger,
 		C:           pconn,
 		F:           f,
 		NodeInfo:    ni,
@@ -732,7 +729,7 @@ func (pc *persistentConn) Loop(ctx context.Context) error {
 
 		// XXX - update running list
 		log.Printf("%s: queued %d tasks",
-			pc.W.RemoteAddr(), len(tasks))
+			pc.NodeInfo.UniqName, len(tasks))
 	}
 }
 
@@ -751,19 +748,18 @@ func (f *Foreman) HandleNodePersistent(resp http.ResponseWriter, req *http.Reque
 		return
 	}
 
-	upgrader := websocket.Upgrader{
-		ReadBufferSize:  1024,
-		WriteBufferSize: 1024,
-	}
-
-	log.Print("  . Upgrading to websocket")
-	conn, err := upgrader.Upgrade(resp, req, nil)
+	log.Print("  . Upgrading connection to websocket")
+	messenger, err := websocket.Upgrade(resp, req)
 	if err != nil {
 		log.Printf("%s: error upgrading connection: %v",
 			req.RemoteAddr, err)
 		return
 	}
-	defer conn.Close()
+	defer func() {
+		if !messenger.IsClosed() {
+			messenger.Close()
+		}
+	}()
 
 	// spin up a persistent connection...
 
@@ -772,7 +768,8 @@ func (f *Foreman) HandleNodePersistent(resp http.ResponseWriter, req *http.Reque
 	loopCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	pc := newPersistentConn(f, *niPtr, conn)
+	messenger.Timeout = 5 * time.Second
+	pc := newPersistentConn(f, *niPtr, messenger)
 	err = pc.Loop(loopCtx)
 
 	if err != nil {

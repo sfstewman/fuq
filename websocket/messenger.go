@@ -6,6 +6,7 @@ import (
 	"github.com/sfstewman/fuq/proto"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -39,14 +40,22 @@ func Dial(rawurl string, jar http.CookieJar) (*Messenger, error) {
 	dialer := websocket.Dialer{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
+		Jar:             jar,
 	}
 
-	conn, _, err := dialer.Dial("ws://localhost", nil)
+	url, err := url.Parse(rawurl)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing url %s: %v",
+			rawurl, err)
+	}
+
+	url.Scheme = "ws"
+	wsConn, _, err := dialer.Dial(url.String(), nil)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Messenger{C: conn}, nil
+	return &Messenger{C: wsConn}, nil
 }
 
 func Connect(conn net.Conn) (*Messenger, error) {
@@ -116,6 +125,10 @@ func (ws *Messenger) Dial() error {
 }
 
 func (ws *Messenger) doclose() error {
+	if ws.closed.err != nil {
+		return nil
+	}
+
 	err := ws.C.Close()
 	if err != nil {
 		return err
@@ -129,7 +142,7 @@ func (ws *Messenger) doclose() error {
 
 	closeErr, ok := err.(*websocket.CloseError)
 	if !ok {
-		panic("should be a close error")
+		panic(fmt.Sprintf("error is not a close error: %#v", err))
 	}
 
 	ws.closed.err = closeErr
@@ -154,7 +167,10 @@ func (ws *Messenger) CloseWithMessage(code int, text string) error {
 		return err
 	}
 
-	return ws.doclose()
+	ws.closed.err = &websocket.CloseError{code, text}
+	ws.C.Close()
+
+	return nil
 }
 
 func (ws *Messenger) Close() error {
@@ -162,6 +178,9 @@ func (ws *Messenger) Close() error {
 }
 
 func (ws *Messenger) Send(msg proto.Message) error {
+	ws.closed.Lock()
+	defer ws.closed.Unlock()
+
 	dt := ws.Timeout
 	t := time.Now()
 

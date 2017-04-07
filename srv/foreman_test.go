@@ -5,11 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/gorilla/websocket"
 	"github.com/sfstewman/fuq"
 	"github.com/sfstewman/fuq/fuqtest"
 	"github.com/sfstewman/fuq/proto"
-	fuqws "github.com/sfstewman/fuq/websocket"
+	"github.com/sfstewman/fuq/websocket"
 	"math/rand"
 	"net/http"
 	"net/http/cookiejar"
@@ -20,7 +19,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-	// "log"
 )
 
 type okAuth struct{}
@@ -1090,7 +1088,7 @@ type testClient struct {
 	NodeInfo fuq.NodeInfo
 }
 
-func newTestClient(t *testing.T, f *Foreman) (*websocket.Conn, testClient) {
+func newTestClient(t *testing.T, f *Foreman) (*websocket.Messenger, testClient) {
 	ni, _, resp := doNodeAuth(t, f)
 	_ = ni
 
@@ -1102,33 +1100,21 @@ func newTestClient(t *testing.T, f *Foreman) (*websocket.Conn, testClient) {
 	server := httptest.NewServer(http.HandlerFunc(f.HandleNodePersistent))
 	defer server.Close()
 
-	url, err := url.Parse(server.URL)
+	theURL, err := url.Parse(server.URL)
 	if err != nil {
 		t.Fatalf("error parsing server URL: %s", server.URL)
 	}
-	jar.SetCookies(url, resp.Cookies())
+	jar.SetCookies(theURL, resp.Cookies())
 
-	dialer := websocket.Dialer{
-		ReadBufferSize:  1024,
-		WriteBufferSize: 1024,
-		Jar:             jar,
-	}
-
-	url.Scheme = "ws"
-	wsConn, _, err := dialer.Dial(url.String(), nil)
-	if err != nil {
-		t.Fatalf("error in establishing websocket connection: %v", err)
-	}
+	messenger, err := websocket.Dial(server.URL, jar)
+	messenger.Timeout = 60 * time.Second
 
 	client := proto.NewConn(proto.Opts{
-		Messenger: &fuqws.Messenger{
-			C:       wsConn,
-			Timeout: 60 * time.Second,
-		},
-		Worker: true,
+		Messenger: messenger,
+		Worker:    true,
 	})
 
-	return wsConn, testClient{Conn: client, NodeInfo: ni}
+	return messenger, testClient{Conn: client, NodeInfo: ni}
 }
 
 func TestForemanNodeOnHello(t *testing.T) {
