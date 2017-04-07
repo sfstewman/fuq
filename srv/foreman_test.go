@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/gorilla/websocket"
 	"github.com/sfstewman/fuq"
+	"github.com/sfstewman/fuq/fuqtest"
 	"github.com/sfstewman/fuq/proto"
 	fuqws "github.com/sfstewman/fuq/websocket"
 	"math/rand"
@@ -1084,7 +1085,12 @@ func TestForemanClientJobList(t *testing.T) {
  * 6) Also, end-to-end testing with workers and a fake runner.
  */
 
-func newTestClient(t *testing.T, f *Foreman) (*websocket.Conn, *proto.Conn) {
+type testClient struct {
+	*proto.Conn
+	NodeInfo fuq.NodeInfo
+}
+
+func newTestClient(t *testing.T, f *Foreman) (*websocket.Conn, testClient) {
 	ni, _, resp := doNodeAuth(t, f)
 	_ = ni
 
@@ -1122,7 +1128,7 @@ func newTestClient(t *testing.T, f *Foreman) (*websocket.Conn, *proto.Conn) {
 		Worker: true,
 	})
 
-	return wsConn, client
+	return wsConn, testClient{Conn: client, NodeInfo: ni}
 }
 
 func TestForemanNodeOnHello(t *testing.T) {
@@ -1164,7 +1170,7 @@ func TestForemanNodeOnHello(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go client.ConversationLoop(ctx)
+	fuqtest.GoPanicOnError(ctx, client.ConversationLoop)
 
 	msg, err := client.SendHello(ctx, proto.HelloData{
 		NumProcs: 7,
@@ -1362,7 +1368,7 @@ func TestPConnNodeNewJobsQueued(t *testing.T) {
 
 	np, nr := msg.AsOkay()
 	if np != 8 || nr != 0 {
-		t.Fatalf("expected OK(7|0), but received OK(%d|%d)", nproc, nrun)
+		t.Fatalf("expected OK(8|0), but received OK(%d|%d)", nproc, nrun)
 	}
 
 	syncCh := make(chan struct{})
@@ -1409,5 +1415,124 @@ func TestPConnNodeNewJobsQueued(t *testing.T) {
 	if nproc != 0 && nrun != 8 {
 		t.Fatalf("expected nproc=%d and nrun=%d, but found nproc=%d and nrun=%d",
 			0, 8, nproc, nrun)
+	}
+}
+
+func TestPConnStop(t *testing.T) {
+	f := newTestingForeman()
+	q := f.JobQueuer.(*simpleQueuer)
+
+	_, err := q.AddJob(fuq.JobDescription{
+		Name:       "job1",
+		NumTasks:   1,
+		WorkingDir: "/foo/bar",
+		LoggingDir: "/foo/bar/logs",
+		Command:    "/foo/foo_it.sh",
+	})
+
+	if err != nil {
+		panic(fmt.Sprintf("error adding job: %v", err))
+	}
+
+	wsConn, client := newTestClient(t, f)
+	defer wsConn.Close()
+	defer client.Close()
+
+	ni := client.NodeInfo
+
+	msgCh := make(chan proto.Message)
+	taskCh := make(chan []fuq.Task)
+
+	var nproc, nrun, nstop uint16 = 8, 0, 0
+	client.OnMessageFunc(proto.MTypeJob, func(msg proto.Message) proto.Message {
+		taskPtr := msg.Data.(*[]fuq.Task)
+		tasks := *taskPtr
+
+		if len(tasks) > int(nproc) {
+			panic("invalid number of tasks")
+		}
+
+		t.Logf("onJob received %d tasks: %v", len(tasks), tasks)
+		nproc -= uint16(len(tasks))
+		nrun += uint16(len(tasks))
+
+		repl := proto.OkayMessage(nproc, nrun, msg.Seq)
+		taskCh <- tasks
+		return repl
+	})
+
+	client.OnMessageFunc(proto.MTypeStop, func(msg proto.Message) proto.Message {
+		ns := uint16(msg.AsStop())
+
+		if ns+nstop > nproc+nrun {
+			panic("nstop > nproc+nrun")
+		}
+
+		nstop += ns
+
+		np := int(nproc) - int(nstop)
+		if np < 0 {
+			np = 0
+		}
+
+		repl := proto.OkayMessage(uint16(np), nrun, msg.Seq)
+		msgCh <- msg
+
+		return repl
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fuqtest.GoPanicOnError(ctx, client.ConversationLoop)
+
+	msg, err := client.SendHello(ctx, proto.HelloData{
+		NumProcs: 8,
+		Running:  nil,
+	})
+
+	if err != nil {
+		t.Fatalf("error in HELLO: %v", err)
+	}
+
+	if msg.Type != proto.MTypeOK {
+		t.Fatalf("expected OK reply, but received %v", msg)
+	}
+
+	np, nr := msg.AsOkay()
+	if np != 8 || nr != 0 {
+		t.Fatalf("expected OK(8|0), but received OK(%d|%d)", nproc, nrun)
+	}
+
+	tasks := <-taskCh
+	// JOB message received
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 task, but received %d tasks", len(tasks))
+	}
+
+	f.ShutdownNodes([]string{ni.UniqName})
+	f.WakeupListeners()
+	msg = <-msgCh
+	// STOP message received
+
+	// make sure that we can still send an UPDATE on the job that's
+	// running
+	msg, err = client.SendUpdate(ctx, fuq.JobStatusUpdate{
+		JobId:   tasks[0].JobId,
+		Task:    tasks[0].Task,
+		Success: true,
+		Status:  "done",
+	})
+
+	if err != nil {
+		t.Fatalf("error sending job update: %v", err)
+	}
+
+	if msg.Type != proto.MTypeOK {
+		t.Fatalf("expected OK(0|0), but message is %v", msg)
+	}
+
+	np, nr = msg.AsOkay()
+	if np != 0 || nr != 0 {
+		t.Fatalf("expected OK(0|0), but received OK(%d,%d)", np, nr)
 	}
 }

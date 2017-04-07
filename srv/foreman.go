@@ -428,38 +428,38 @@ func (f *Foreman) http2Convo(resp http.ResponseWriter, req *http.Request, ni fuq
 */
 
 // TODO: need tests to check failure cases
-func (f *Foreman) checkCookie(resp http.ResponseWriter, req *http.Request) bool {
+func (f *Foreman) checkCookie(resp http.ResponseWriter, req *http.Request) *fuq.NodeInfo {
 	cookie, err := req.Cookie(ForemanCookie)
 	if err != nil {
 		log.Printf("%s: missing session cookie (cookies = %v)",
 			req.RemoteAddr, req.Cookies())
 		http.Error(resp, "missing session cookie", http.StatusUnauthorized)
-		return false
+		return nil
 	}
 
 	cookieData := fuq.Cookie(cookie.Value)
 	if len(cookieData) > MaxCookieLength {
 		log.Printf("%s: cookie is too long (%d bytes)", req.RemoteAddr, len(cookieData))
 		http.Error(resp, "cannot validate cookie", http.StatusUnauthorized)
-		return false
+		return nil
 	}
 
 	ni, err := f.Lookup(cookieData)
 	if err != nil {
 		log.Printf("%s: error looking up cookie: %v", req.RemoteAddr, err)
 		http.Error(resp, "cannot validate cookie", http.StatusUnauthorized)
-		return false
+		return nil
 	}
 
 	if ni.Node == "" {
 		log.Printf("%s: cookie '%s' not found", req.RemoteAddr, cookieData)
 		http.Error(resp, "cannot validate cookie", http.StatusForbidden)
-		return false
+		return nil
 	}
 
 	log.Printf("%s: cookie %s from node %v", req.RemoteAddr, cookieData, ni)
 
-	return true
+	return &ni
 }
 
 type persistentConn struct {
@@ -469,14 +469,17 @@ type persistentConn struct {
 	C *proto.Conn
 	F *Foreman
 
+	NodeInfo fuq.NodeInfo
+
 	ready       chan struct{}
 	helloSignal chan struct{}
+	stopSignal  chan struct{}
 
-	nproc, nrun uint16
+	nproc, nrun, nstop uint16
 }
 
-func newPersistentConn(f *Foreman, conn *websocket.Conn) *persistentConn {
-	messenger := fuqws.Messenger{C: conn, Timeout: 5 * time.Second}
+func newPersistentConn(f *Foreman, ni fuq.NodeInfo, conn *websocket.Conn) *persistentConn {
+	messenger := &fuqws.Messenger{C: conn, Timeout: 5 * time.Second}
 
 	pconn := proto.NewConn(proto.Opts{
 		Messenger: messenger,
@@ -488,7 +491,9 @@ func newPersistentConn(f *Foreman, conn *websocket.Conn) *persistentConn {
 		W:           conn,
 		C:           pconn,
 		F:           f,
+		NodeInfo:    ni,
 		helloSignal: make(chan struct{}),
+		stopSignal:  make(chan struct{}),
 	}
 
 	pconn.OnMessageFunc(proto.MTypeHello, pc.onHello)
@@ -538,10 +543,14 @@ func (pc *persistentConn) onUpdate(msg proto.Message) proto.Message {
 	}
 
 	// TODO - jobs that occupy more than one core
-	pc.nproc++
+	if pc.nstop > 0 {
+		pc.nstop--
+	} else {
+		pc.nproc++
+	}
 	pc.nrun--
 
-	log.Printf("onUpdate: nproc=%d, nrun=%d", pc.nproc, pc.nrun)
+	log.Printf("onUpdate: nproc=%d, nrun=%d, nstop=%d", pc.nproc, pc.nrun, pc.nstop)
 
 	fmt.Fprintf(os.Stderr, "pconn(%p): UPDATE received\n", pc)
 	if pc.ready != nil {
@@ -550,35 +559,83 @@ func (pc *persistentConn) onUpdate(msg proto.Message) proto.Message {
 		pc.ready = nil
 	}
 
+	if pc.nproc == 0 && pc.nrun == 0 {
+		close(pc.stopSignal)
+	}
+
 	fmt.Fprintf(os.Stderr, " -- WAKEUP\n")
 	pc.F.WakeupListeners()
 	return proto.OkayMessage(pc.nproc, pc.nrun, msg.Seq)
 }
 
-func (pc *persistentConn) waitOnWorkers(ctx context.Context) (int, error) {
-	for {
-		pc.mu.Lock()
+func (pc *persistentConn) numProcAvail() (int, chan struct{}) {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
 
-		nproc := int(pc.nproc)
+	nproc := int(pc.nproc)
+	if nproc > 0 {
+		return nproc, nil
+	}
+
+	if pc.ready == nil {
+		pc.ready = make(chan struct{})
+	}
+	ready := pc.ready
+
+	return 0, ready
+}
+
+func (pc *persistentConn) waitOnWorkers(ctx context.Context) (int, error) {
+	f := pc.F
+	ni := pc.NodeInfo
+	for {
+		nproc, ready := pc.numProcAvail()
 		if nproc > 0 {
-			pc.mu.Unlock()
 			return nproc, nil
 		}
 
-		if pc.ready == nil {
-			pc.ready = make(chan struct{})
-		}
-		ready := pc.ready
-
-		pc.mu.Unlock()
+		wakeup := f.ready(true)
 
 		select {
 		case <-ready:
 			continue
+		case <-wakeup:
+			if f.IsNodeShutdown(ni.UniqName) {
+				return 0, nil
+			}
 		case <-ctx.Done():
 			return 0, ctx.Err()
 		}
 	}
+}
+
+func (pc *persistentConn) sendStop(ctx context.Context) error {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+
+	nstop := uint32(pc.nproc) + uint32(pc.nrun)
+
+	resp, err := pc.C.SendStop(ctx, nstop)
+	if err != nil {
+		return err
+	}
+
+	if resp.Type != proto.MTypeOK {
+		return fmt.Errorf("error in reply: %v", resp)
+	}
+
+	np, nr := resp.AsOkay()
+
+	// XXX - check for overflow
+	nleft := uint32(np) + uint32(nr)
+	pc.nstop = uint16(nleft)
+
+	log.Printf("sentStop: orig(np=%d,nr=%d,ns=%d).  curr(np=%d,nr=%d,nleft=%d,ns=%d)",
+		pc.nproc, pc.nrun, nstop, np, nr, nleft, pc.nstop)
+
+	pc.nproc, pc.nrun = np, nr
+	log.Printf("sentStop: nproc=%d, nrun=%d, nstop=%d", pc.nproc, pc.nrun, pc.nstop)
+	return nil
 }
 
 func (pc *persistentConn) sendJobs(ctx context.Context, tasks []fuq.Task) error {
@@ -601,6 +658,16 @@ func (pc *persistentConn) sendJobs(ctx context.Context, tasks []fuq.Task) error 
 	return nil
 }
 
+func (pc *persistentConn) waitForStop(ctx context.Context) error {
+	stopSignal := pc.stopSignal
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-stopSignal:
+		return nil
+	}
+}
+
 func (pc *persistentConn) Loop(ctx context.Context) error {
 	go pc.C.ConversationLoop(ctx)
 
@@ -613,12 +680,24 @@ func (pc *persistentConn) Loop(ctx context.Context) error {
 	}
 
 	f := pc.F
+	uniqName := pc.NodeInfo.UniqName
 
 	for {
 		nproc, err := pc.waitOnWorkers(ctx)
-
 		if err != nil {
 			return err
+		}
+
+		if f.IsNodeShutdown(uniqName) {
+			if err := pc.sendStop(ctx); err != nil {
+				log.Printf("error sending STOP: %v", err)
+				return err
+			}
+			return pc.waitForStop(ctx)
+		}
+
+		if nproc == 0 {
+			continue
 		}
 
 		f.jobsSignal.mu.Lock()
@@ -639,6 +718,7 @@ func (pc *persistentConn) Loop(ctx context.Context) error {
 			case <-ctx.Done():
 				return nil
 			case <-jobsAvail:
+				log.Printf("pc(%p): jobsAvail signal", pc)
 				continue
 			}
 		}
@@ -665,7 +745,8 @@ func (f *Foreman) HandleNodePersistent(resp http.ResponseWriter, req *http.Reque
 
 	log.Print("  . Checking cookie")
 	// XXX - check that this fails on no/bad cookie in tests
-	if !f.checkCookie(resp, req) {
+	niPtr := f.checkCookie(resp, req)
+	if niPtr == nil {
 		log.Printf("%s: invalid cookie", req.RemoteAddr)
 		return
 	}
@@ -688,9 +769,11 @@ func (f *Foreman) HandleNodePersistent(resp http.ResponseWriter, req *http.Reque
 
 	log.Print("  . Spinning up consistent connection")
 	ctx := req.Context()
-	pc := newPersistentConn(f, conn)
+	loopCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	err = pc.Loop(ctx)
+	pc := newPersistentConn(f, *niPtr, conn)
+	err = pc.Loop(loopCtx)
 
 	if err != nil {
 		log.Printf("%s connection error: %v", req.RemoteAddr, err)
