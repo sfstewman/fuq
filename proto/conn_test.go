@@ -159,7 +159,7 @@ func newWebSocketConn() *wsConn {
 	wsc.ctx, wsc.cancelFunc = context.WithCancel(context.Background())
 
 	wsc.mcw = proto.NewConn(proto.Opts{
-		Messenger: websocket.Messenger{
+		Messenger: &websocket.Messenger{
 			C:       wsc.pair.CConn,
 			Timeout: 60 * time.Second,
 		},
@@ -167,7 +167,7 @@ func newWebSocketConn() *wsConn {
 	})
 
 	wsc.mcf = proto.NewConn(proto.Opts{
-		Messenger: websocket.Messenger{
+		Messenger: &websocket.Messenger{
 			C:       wsc.pair.SConn,
 			Timeout: 60 * time.Second,
 		},

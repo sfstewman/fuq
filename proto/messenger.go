@@ -1,13 +1,17 @@
 package proto
 
 import (
+	"errors"
 	"net"
 	"net/http"
 	"time"
 )
 
+var (
+	ErrClosed = errors.New("connection is closed")
+)
+
 type Messenger interface {
-	Dial() error
 	Close() error
 
 	Send(m Message) error

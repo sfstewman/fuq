@@ -1121,7 +1121,7 @@ func newTestClient(t *testing.T, f *Foreman) (*websocket.Conn, testClient) {
 	}
 
 	client := proto.NewConn(proto.Opts{
-		Messenger: fuqws.Messenger{
+		Messenger: &fuqws.Messenger{
 			C:       wsConn,
 			Timeout: 60 * time.Second,
 		},

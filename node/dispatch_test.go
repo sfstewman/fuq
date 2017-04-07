@@ -46,7 +46,7 @@ type dispatcherTestState struct {
 	cancelFunc context.CancelFunc
 
 	socketPair *fuqtest.WSPair
-	messenger  websocket.Messenger
+	messenger  *websocket.Messenger
 
 	runner     Runner
 	dispatcher *Dispatch
@@ -71,7 +71,7 @@ func newDispatcherTestState(nw int, runner Runner) *dispatcherTestState {
 	dts.tmpDir = tmpDir
 	dts.ctx, dts.cancelFunc = context.WithCancel(context.Background())
 	dts.socketPair = fuqtest.NewWSPair(tmpDir)
-	dts.messenger = websocket.Messenger{
+	dts.messenger = &websocket.Messenger{
 		C:       dts.socketPair.CConn,
 		Timeout: 1 * time.Second,
 	}
@@ -102,7 +102,7 @@ func (dts *dispatcherTestState) startServer() (*proto.Conn, chan proto.Message, 
 	d, ctx := dts.dispatcher, dts.ctx
 
 	server := proto.NewConn(proto.Opts{
-		Messenger: websocket.Messenger{
+		Messenger: &websocket.Messenger{
 			C:       dts.socketPair.SConn,
 			Timeout: 1 * time.Second,
 		},

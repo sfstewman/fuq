@@ -154,6 +154,10 @@ func (mc *Conn) incomingLoop(ctx context.Context, msgCh chan<- Message, errorCh 
 		// even if there's an error, we need to update the sequence number
 		mc.updateSeq(msg.Seq)
 
+		if err == ErrClosed {
+			return
+		}
+
 		if err != nil {
 			log.Printf("error in incoming loop: %v", err)
 			mc.sendError(ctx, errorCh, reply{msg, err})
@@ -201,7 +205,7 @@ func (mc *Conn) dispatchMessage(m Message) error {
 	return mc.xmit(resp)
 }
 
-func (mc *Conn) ConversationLoop(ctx context.Context) error {
+func (mc *Conn) ConversationLoop(ctx context.Context) (err error) {
 	var (
 		outgoingCh chan outgoingMessage
 
@@ -220,10 +224,27 @@ func (mc *Conn) ConversationLoop(ctx context.Context) error {
 
 	go mc.incomingLoop(incomingCtx, incomingCh, errorCh)
 
+	defer func() {
+		if replyCh == nil {
+			return
+		}
+
+		if err == nil {
+			err = ErrClosed
+		}
+
+		select {
+		case replyCh <- reply{E: ErrClosed}:
+		default:
+			panic("reply expected, but could not send")
+		}
+	}()
+
 	// log.Printf("%p --> CL: START", mc)
 
 recv_loop:
 	for {
+		err = nil
 		outgoingCh = nil
 		if replyCh == nil {
 			outgoingCh = mc.outgoingCh
@@ -234,6 +255,7 @@ recv_loop:
 		case msg := <-outgoingCh:
 			seq, err := mc.xmitWithSeq(msg.M)
 			if err != nil {
+				log.Printf("error transmiting message %v", msg.M)
 				msg.R <- reply{E: err}
 				continue
 			}
@@ -280,8 +302,9 @@ recv_loop:
 			continue recv_loop
 
 		dispatch:
-			if err := mc.dispatchMessage(msg); err != nil {
+			if err = mc.dispatchMessage(msg); err != nil {
 				log.Printf("ERROR dispatching message [%v]: %v", msg, err)
+				return err
 			}
 
 			if pending != nil && replyCh == nil {

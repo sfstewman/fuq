@@ -424,10 +424,6 @@ func (d *Dispatch) QueueLoop(ctx context.Context) error {
 
 	errCh := make(chan error)
 
-	if err := d.Messenger.Dial(); err != nil {
-		return err
-	}
-
 	go func() {
 		if err := d.M.ConversationLoop(ctx); err != nil {
 			errCh <- err
