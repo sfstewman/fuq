@@ -336,7 +336,7 @@ func main() {
 			}
 			defer stores.Close()
 
-			f, err := srv.NewForeman(srv.ForemanOpts{
+			s, err := srv.NewServer(srv.ServerOpts{
 				Auth:        config,
 				Queuer:      stores.Jobs,
 				CookieMaker: stores.Cookies,
@@ -348,9 +348,9 @@ func main() {
 				log.Printf("error starting foreman: %v", err)
 				return
 			}
-			defer f.Close()
+			defer s.Close()
 
-			if err := srv.StartAPIServer(f, config); err != nil {
+			if err := srv.StartAPIServer(s, config); err != nil {
 				log.Printf("error starting foreman: %v", err)
 				return
 			}
