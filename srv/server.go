@@ -43,7 +43,8 @@ func StartAPIServer(f *Foreman, config fuq.Config) error {
 	log.Printf("Adding handlers")
 	AddHandler(mux, "/hello", f.HandleHello)
 	AddHandler(mux, "/node/reauth", f.HandleNodeReauth)
-	AddHandler(mux, "/node/persistent", f.HandleNodePersistent)
+	// AddHandler(mux, "/node/persistent", f.HandleNodePersistent)
+	mux.HandleFunc("/node/persistent", f.HandleNodePersistent)
 
 	f.AddNodeHandler(mux, "/job/request", f.HandleNodeJobRequest)
 	f.AddNodeHandler(mux, "/job/status", f.HandleNodeJobUpdate)

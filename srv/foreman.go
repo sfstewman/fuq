@@ -521,6 +521,8 @@ func (pc *persistentConn) onHello(msg proto.Message) proto.Message {
 const MaxUint16 uint16 = ^uint16(0)
 
 func (pc *persistentConn) onUpdate(msg proto.Message) proto.Message {
+	log.Printf("received UPDATE %v", msg)
+
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 
@@ -636,8 +638,15 @@ func (pc *persistentConn) sendStop(ctx context.Context) error {
 }
 
 func (pc *persistentConn) sendJobs(ctx context.Context, tasks []fuq.Task) error {
+	// pc.mu.Lock()
+	// defer pc.mu.Unlock()
+
+	log.Printf("SENDING %d jobs", len(tasks))
+
 	pc.mu.Lock()
-	defer pc.mu.Unlock()
+	pc.nproc -= uint16(len(tasks))
+	pc.nrun += uint16(len(tasks))
+	pc.mu.Unlock()
 
 	resp, err := pc.C.SendJob(ctx, tasks)
 	if err != nil {
@@ -649,9 +658,13 @@ func (pc *persistentConn) sendJobs(ctx context.Context, tasks []fuq.Task) error 
 	}
 
 	np, nr := resp.AsOkay()
+	_, _ = np, nr
 
-	pc.nproc, pc.nrun = np, nr
-	log.Printf("sentJobs: nproc=%d, nrun=%d", pc.nproc, pc.nrun)
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+
+	log.Printf("sentJobs: nproc=%d, nrun=%d, reply OK(%d|%d)",
+		pc.nproc, pc.nrun, np, nr)
 	return nil
 }
 
@@ -768,7 +781,9 @@ func (f *Foreman) HandleNodePersistent(resp http.ResponseWriter, req *http.Reque
 	loopCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	messenger.Timeout = 5 * time.Second
+	messenger.Timeout = 5 * time.Minute
+	// XXX - deal with errors
+	go messenger.Heartbeat(loopCtx)
 	pc := newPersistentConn(f, *niPtr, messenger)
 	err = pc.Loop(loopCtx)
 

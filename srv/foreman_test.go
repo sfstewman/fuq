@@ -1106,7 +1106,7 @@ func newTestClient(t *testing.T, f *Foreman) (*websocket.Messenger, testClient) 
 	}
 	jar.SetCookies(theURL, resp.Cookies())
 
-	messenger, err := websocket.Dial(server.URL, jar)
+	messenger, _, err := websocket.Dial(server.URL, jar)
 	messenger.Timeout = 60 * time.Second
 
 	client := proto.NewConn(proto.Opts{

@@ -1,14 +1,23 @@
 package websocket
 
 import (
+	"context"
+	"crypto/tls"
 	"fmt"
 	"github.com/gorilla/websocket"
 	"github.com/sfstewman/fuq/proto"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"sync"
 	"time"
+)
+
+const (
+	DefaultTimeout = 5 * time.Minute
+	MinHeartbeat   = 50 * time.Millisecond
+	MaxHeartbeat   = 60 * time.Minute
 )
 
 type hasLock struct{ locked bool }
@@ -36,26 +45,39 @@ func Upgrade(resp http.ResponseWriter, req *http.Request) (*Messenger, error) {
 	return &Messenger{C: conn}, nil
 }
 
-func Dial(rawurl string, jar http.CookieJar) (*Messenger, error) {
+func Dial(rawurl string, jar http.CookieJar) (*Messenger, *http.Response, error) {
+	return DialWithTLS(rawurl, jar, nil)
+}
+
+func DialWithTLS(rawurl string, jar http.CookieJar, tlsCfg *tls.Config) (*Messenger, *http.Response, error) {
 	dialer := websocket.Dialer{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
 		Jar:             jar,
+		TLSClientConfig: tlsCfg,
 	}
 
 	url, err := url.Parse(rawurl)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing url %s: %v",
+		return nil, nil, fmt.Errorf("error parsing url %s: %v",
 			rawurl, err)
 	}
 
-	url.Scheme = "ws"
-	wsConn, _, err := dialer.Dial(url.String(), nil)
-	if err != nil {
-		return nil, err
+	switch url.Scheme {
+	case "http", "ws":
+		url.Scheme = "ws"
+	case "https", "wss":
+		url.Scheme = "wss"
+	default:
+		return nil, nil, fmt.Errorf("unknown url scheme: %s", url.Scheme)
 	}
 
-	return &Messenger{C: wsConn}, nil
+	wsConn, resp, err := dialer.Dial(url.String(), nil)
+	if err != nil {
+		return nil, resp, err
+	}
+
+	return &Messenger{C: wsConn}, resp, nil
 }
 
 func Connect(conn net.Conn) (*Messenger, error) {
@@ -177,6 +199,50 @@ func (ws *Messenger) Close() error {
 	return ws.CloseWithMessage(websocket.CloseNormalClosure, "closing")
 }
 
+func (ws *Messenger) sendPing(ctx context.Context, count uint) error {
+	ws.closed.Lock()
+	defer ws.closed.Unlock()
+
+	msg := []byte(fmt.Sprintf("PING_%d", count))
+	return ws.C.WriteMessage(websocket.PingMessage, msg)
+}
+
+func (ws *Messenger) Heartbeat(ctx context.Context) error {
+	var pingCount uint
+
+	timeout := ws.Timeout
+	hbInterval := timeout / 5
+
+	if hbInterval < MinHeartbeat {
+		hbInterval = MinHeartbeat
+	}
+
+	if hbInterval > MaxHeartbeat {
+		hbInterval = MaxHeartbeat
+	}
+
+	ws.C.SetPongHandler(func(data string) error {
+		log.Printf("PONG: %s", data)
+		return nil
+	})
+
+	ticker := time.NewTicker(hbInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			pingCount++
+			if err := ws.sendPing(ctx, pingCount); err != nil {
+				return err
+			}
+			log.Printf("PING %d", pingCount)
+		}
+	}
+}
+
 func (ws *Messenger) Send(msg proto.Message) error {
 	ws.closed.Lock()
 	defer ws.closed.Unlock()
@@ -199,10 +265,8 @@ func (ws *Messenger) Send(msg proto.Message) error {
 }
 
 func (ws *Messenger) Receive() (proto.Message, error) {
-	dt := ws.Timeout
-	t := time.Now()
-
-	ws.C.SetReadDeadline(t.Add(dt))
+	// zero value: no read deadlines
+	ws.C.SetReadDeadline(time.Time{})
 
 	mt, r, err := ws.C.NextReader()
 	if err != nil {

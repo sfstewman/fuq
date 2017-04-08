@@ -12,6 +12,8 @@ import (
 	"os"
 )
 
+const EnableHTTP2 = false
+
 func LogIfError(err error, pfxFmt string, args ...interface{}) {
 	if err == nil {
 		return
@@ -114,7 +116,7 @@ func makeEndpoint(c Config, configHTTP2 bool) (*Endpoint, error) {
 	}
 
 	// enable http/2 support
-	if configHTTP2 {
+	if EnableHTTP2 && configHTTP2 {
 		if err := http2.ConfigureTransport(transport); err != nil {
 			return nil, fmt.Errorf("error adding http/2 support: %v", err)
 		}

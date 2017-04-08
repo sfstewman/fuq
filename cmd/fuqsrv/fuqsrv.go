@@ -16,7 +16,11 @@ import (
 	"github.com/sfstewman/fuq/db"
 	"github.com/sfstewman/fuq/node"
 	"github.com/sfstewman/fuq/srv"
+	"github.com/sfstewman/fuq/websocket"
+	"io/ioutil"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"os/user"
@@ -90,12 +94,88 @@ func startWorkers(wcfg *srv.NodeConfig, nproc int, config fuq.Config, wg *sync.W
 	return nil
 }
 
+func startDispatcher(wcfg *srv.NodeConfig, nproc int, config fuq.Config) error {
+	if nproc <= 0 {
+		return nil
+	}
+
+	ep, err := fuq.NewEndpoint(config)
+	if err != nil {
+		return fmt.Errorf("error starting workers: %v", err)
+	}
+
+	if err := wcfg.NewCookieWithRetries(ep, HelloTries); err != nil {
+		return fmt.Errorf("error obtaining cookies: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	workerCtx := node.WorkerContext(ctx)
+
+	//
+	origUniqName := wcfg.NodeInfo.UniqName
+	uniqName := strings.Replace(origUniqName, ":", "_", -1)
+	logDir := ep.Config.LogDir
+
+	log.Printf("HELLO finished.  Unique name is '%s'",
+		origUniqName)
+
+	url := ep.Config.EndpointURL("node/persistent")
+	log.Printf("connecting to %s", url)
+
+	tlsCfg, err := fuq.SetupTLS(config)
+	if err != nil {
+		return fmt.Errorf("error configuring TLS: %v", err)
+	}
+
+	messenger, resp, err := websocket.DialWithTLS(url, ep.Client.Jar, tlsCfg)
+	if err != nil {
+		log.Printf("error connecting: %v", err)
+		log.Printf("response is: %#v", resp)
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			log.Printf("error reading response body: %v", err)
+		} else {
+			log.Printf("response body: %s", body)
+		}
+		return fmt.Errorf("error connecting: %v", err)
+	}
+
+	messenger.Timeout = 5 * time.Minute
+	defer messenger.CloseNow()
+
+	// XXX - handle any errors you encounter here!
+	go messenger.Heartbeat(ctx)
+
+	logPath := filepath.Join(logDir,
+		fmt.Sprintf("%s.log", uniqName))
+
+	logFile, err := os.Create(logPath)
+	fuq.FatalIfError(err, "error creating worker log '%s'", logPath)
+	defer logFile.Close()
+	//
+
+	logger := log.New(logFile, "w:"+uniqName, log.LstdFlags)
+	dispatcher := node.NewDispatch(node.DispatchConfig{
+		DefaultLogDir: logDir,
+		Logger:        logger,
+		Messenger:     messenger,
+	})
+
+	var defaultRunner node.Runner = nil
+	dispatcher.StartWorkers(workerCtx, nproc, defaultRunner)
+
+	return dispatcher.QueueLoop(ctx)
+}
+
 func main() {
 	var (
 		err                          error
 		isForeman, onlyWriteConfig   bool
 		srvConfigFile, sysConfigFile string
 		retryServerConfig            bool
+		useDispatcher                bool
 		workerTag                    string
 		initialWait                  int
 		config                       fuq.Config
@@ -103,6 +183,7 @@ func main() {
 		overwriteConfig              bool
 		numCPUs                      int
 		u                            *user.User
+		dbgAddr                      string
 	)
 
 	// command line options
@@ -125,6 +206,7 @@ func main() {
 
 	// Setup command-line flags
 	flag.BoolVar(&isForeman, "f", false, "invoke fuq as foreman")
+	flag.BoolVar(&useDispatcher, "dispatch", false, "workers use persistent dispatch")
 	flag.BoolVar(&onlyWriteConfig, "w", false, "invoke fuq and foreman, write config, and exit")
 	flag.IntVar(&numCPUs, "np", 1, "number of concurrent cores")
 	flag.StringVar(&srvConfigFile, "srv", srvConfigFile, "server configuration file")
@@ -147,6 +229,8 @@ func main() {
 	flag.StringVar(&config.CertName, "certname", "", "name in TLS certificate")
 
 	flag.StringVar(&workerTag, "tag", "", "tag for workers")
+
+	flag.StringVar(&dbgAddr, "debug", "", "run debugging server")
 
 	flag.Parse()
 
@@ -286,8 +370,26 @@ func main() {
 		log.Fatalf("error generating worker config: %v", err)
 	}
 
-	if err := startWorkers(wc, nproc, config, &wg); err != nil {
-		log.Fatalf("error starting workers: %v", err)
+	if dbgAddr != "" {
+		log.Printf("Starting debugging http server: %s", dbgAddr)
+		go func() {
+			log.Println(http.ListenAndServe(dbgAddr, nil))
+		}()
+	}
+
+	if useDispatcher {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := startDispatcher(wc, nproc, config)
+			if err != nil {
+				log.Fatalf("error in dispatcher: %v", err)
+			}
+		}()
+	} else {
+		if err := startWorkers(wc, nproc, config, &wg); err != nil {
+			log.Fatalf("error starting workers: %v", err)
+		}
 	}
 
 	if !isForeman {

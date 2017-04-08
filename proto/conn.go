@@ -150,6 +150,7 @@ func (mc *Conn) incomingLoop(ctx context.Context, msgCh chan<- Message, errorCh 
 		}
 
 		msg, err := mc.messenger.Receive()
+		log.Printf("INCOMING message: %v", msg)
 
 		// even if there's an error, we need to update the sequence number
 		mc.updateSeq(msg.Seq)
@@ -165,6 +166,8 @@ func (mc *Conn) incomingLoop(ctx context.Context, msgCh chan<- Message, errorCh 
 
 		select {
 		case msgCh <- msg:
+			log.Printf("proto.Conn(%p): incoming sent to main loop",
+				mc)
 			/* nop */
 		case <-done:
 			return
@@ -183,7 +186,7 @@ func (mc *Conn) dispatchMessage(m Message) error {
 		return fmt.Errorf("no handler for message %v", m)
 	}
 
-	// log.Printf("%p --> MD: dispatching handler for message %d", mc, m.Seq)
+	log.Printf("proto.Conn(%p) --> MD: dispatching handler for message %v", mc, m)
 	seq := m.Seq
 
 	if h == nil {
@@ -260,6 +263,10 @@ recv_loop:
 				continue
 			}
 
+			mm := msg.M
+			mm.Seq = seq
+			log.Printf("proto.Conn(%p): main loop OUTGOING: %v", mc, mm)
+
 			waitingSeq = seq
 			replyCh = msg.R
 
@@ -268,11 +275,15 @@ recv_loop:
 				break recv_loop
 			}
 
+			log.Printf("proto.Conn(%p): main loop INCOMING: %v", mc, msg)
+
 			if replyCh == nil || msg.Seq < waitingSeq || msg.IsStopImmed() {
 				goto dispatch
 			}
 
 			if msg.Seq == waitingSeq {
+				log.Printf("proto.Conn(%p): message is REPLY to %d",
+					mc, waitingSeq)
 				replyCh <- reply{M: msg}
 				replyCh = nil
 				waitingSeq = 0
@@ -298,18 +309,26 @@ recv_loop:
 				panic("pending queue is full!  other side should block until reply")
 			}
 
+			log.Printf("proto.Conn(%p): message is now PENDING, waiting reply to %d",
+				mc, waitingSeq)
+
 			pending = &msg
 			continue recv_loop
 
 		dispatch:
+			log.Printf("proto.Conn(%p): dispatching message", mc)
+
 			if err = mc.dispatchMessage(msg); err != nil {
 				log.Printf("ERROR dispatching message [%v]: %v", msg, err)
 				return err
 			}
 
+			log.Printf("proto.Conn(%p): checking pending", mc)
 			if pending != nil && replyCh == nil {
 				msg = *pending
 				pending = nil
+				log.Printf("proto.Conn(%p): dispatching PENDING message %v",
+					mc, msg)
 				goto dispatch
 			}
 
