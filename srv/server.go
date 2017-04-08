@@ -642,7 +642,9 @@ func (s *Server) HandleClientJobState(resp http.ResponseWriter, req *http.Reques
 
 func (s *Server) HandleClientShutdown(resp http.ResponseWriter, req *http.Request, mesg []byte) {
 	log.Printf("client shutdown requested")
-	defer close(s.Done)
+	if s.Done != nil {
+		defer close(s.Done)
+	}
 
 	RespondWithJSON(resp, struct{ ok bool }{true})
 }

@@ -131,6 +131,18 @@ type Foreman struct {
 	connections connectionSet
 }
 
+func NewForeman(q JobQueuer, done chan<- struct{}) (*Foreman, error) {
+	f := Foreman{
+		JobQueuer: q,
+		Done:      done,
+	}
+
+	f.shutdownReq.shutdownHost = make(map[string]struct{})
+	f.connections = newConnectionSet()
+
+	return &f, nil
+}
+
 func (f *Foreman) Close() error {
 	return nil
 }
@@ -145,18 +157,6 @@ func (f *Foreman) ready(lock bool) <-chan struct{} {
 		f.jobsSignal.ready = make(chan struct{})
 	}
 	return f.jobsSignal.ready
-}
-
-func NewForeman(q JobQueuer, done chan<- struct{}) (*Foreman, error) {
-	f := Foreman{
-		JobQueuer: q,
-		Done:      done,
-	}
-
-	f.shutdownReq.shutdownHost = make(map[string]struct{})
-	f.connections = newConnectionSet()
-
-	return &f, nil
 }
 
 func (f *Foreman) AllShutdownNodes() []string {
@@ -226,10 +226,10 @@ func isValidJob(job fuq.JobDescription) bool {
 func (f *Foreman) WakeupListeners() {
 	f.jobsSignal.mu.Lock()
 	defer f.jobsSignal.mu.Unlock()
+
 	signal := f.jobsSignal.ready
 	f.jobsSignal.ready = make(chan struct{})
 	if signal != nil {
 		close(signal)
 	}
-	// f.jobsSignal.cond.Broadcast()
 }
