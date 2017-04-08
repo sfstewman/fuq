@@ -9,10 +9,16 @@ import (
 )
 
 func workerListCmd(cfg fuq.Config, args []string) error {
-	outputJSON := false
+	var outputJSON = false
+	var msg struct {
+		CookieList bool `json:"cookie_list"`
+		JobList    bool `json:"job_list"`
+	}
 
 	flags := flag.NewFlagSet("workerList", flag.ContinueOnError)
 	flags.BoolVar(&outputJSON, "j", outputJSON, "output json response")
+	flags.BoolVar(&msg.CookieList, "c", msg.CookieList, "display all nodes with valid cookies")
+	flags.BoolVar(&msg.JobList, "l", msg.JobList, "display job data")
 
 	flags.Parse(args[1:])
 
@@ -30,7 +36,7 @@ func workerListCmd(cfg fuq.Config, args []string) error {
 	}
 
 	ret := []fuq.NodeInfo{}
-	if err := callEndpoint(cfg, "client/nodes/list", nil, &ret); err != nil {
+	if err := callEndpoint(cfg, "client/nodes/list", msg, &ret); err != nil {
 		return fmt.Errorf("Error encountered listing worker nodes: %v", err)
 	}
 

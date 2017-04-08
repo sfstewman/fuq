@@ -94,10 +94,49 @@ type ForemanOpts struct {
 	Done        chan<- struct{}
 }
 
+type connectionSet struct {
+	sync.Mutex
+	Set map[*persistentConn]struct{}
+}
+
+func newConnectionSet() connectionSet {
+	return connectionSet{
+		Set: make(map[*persistentConn]struct{}),
+	}
+}
+
+func (cm *connectionSet) AddConn(pc *persistentConn) {
+	cm.Lock()
+	defer cm.Unlock()
+
+	cm.Set[pc] = struct{}{}
+}
+
+func (cm *connectionSet) DelConn(pc *persistentConn) {
+	cm.Lock()
+	defer cm.Unlock()
+
+	delete(cm.Set, pc)
+}
+
+func (cm *connectionSet) EachConn(fn func(*persistentConn) error) error {
+	cm.Lock()
+	defer cm.Unlock()
+
+	for pc := range cm.Set {
+		if err := fn(pc); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 type Foreman struct {
 	JobQueuer
 	fuq.CookieMaker
-	Auth AuthChecker
+	Auth       AuthChecker
+	TaskLogger TaskLogger
 
 	Done chan<- struct{}
 
@@ -113,6 +152,8 @@ type Foreman struct {
 		mu    sync.Mutex
 		ready chan struct{}
 	}
+
+	connections connectionSet
 }
 
 func (f *Foreman) Close() error {
@@ -140,6 +181,7 @@ func NewForeman(opts ForemanOpts) (*Foreman, error) {
 	}
 
 	f.shutdownReq.shutdownHost = make(map[string]struct{})
+	f.connections = newConnectionSet()
 
 	return &f, nil
 }
@@ -785,6 +827,10 @@ func (f *Foreman) HandleNodePersistent(resp http.ResponseWriter, req *http.Reque
 	// XXX - deal with errors
 	go messenger.Heartbeat(loopCtx)
 	pc := newPersistentConn(f, *niPtr, messenger)
+
+	f.connections.AddConn(pc)
+	defer f.connections.DelConn(pc)
+
 	err = pc.Loop(loopCtx)
 
 	if err != nil {
@@ -795,11 +841,39 @@ func (f *Foreman) HandleNodePersistent(resp http.ResponseWriter, req *http.Reque
 }
 
 func (f *Foreman) HandleClientNodeList(resp http.ResponseWriter, req *http.Request, mesg []byte) {
-	nodes, err := f.AllNodes()
-	if err != nil {
-		log.Printf("error fetching all nodes: %v", err)
-		fuq.InternalError(resp, req)
+	var (
+		msg struct {
+			CookieList bool `json:"cookie_list"`
+			JobList    bool `json:"job_list"`
+		}
+		nodes []fuq.NodeInfo
+		err   error
+	)
+
+	if err = json.Unmarshal(mesg, &msg); err != nil {
+		log.Printf("error unmarshaling node list request at %s: %v",
+			req.URL, err)
+		fuq.BadRequest(resp, req)
 		return
+	}
+
+	if msg.CookieList {
+		nodes, err = f.AllNodes()
+		if err != nil {
+			log.Printf("error fetching all nodes: %v", err)
+			fuq.InternalError(resp, req)
+			return
+		}
+	} else {
+		err = f.connections.EachConn(func(pc *persistentConn) error {
+			nodes = append(nodes, pc.NodeInfo)
+			return nil
+		})
+		if err != nil {
+			log.Printf("error fetching connected nodes: %v", err)
+			fuq.InternalError(resp, req)
+			return
+		}
 	}
 
 	RespondWithJSON(resp, &nodes)
