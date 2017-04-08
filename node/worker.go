@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/sfstewman/fuq"
 	"log"
+	"sync"
 )
 
 const (
@@ -62,6 +63,12 @@ type Worker struct {
 	DefaultLogDir string
 	NumWaits      int
 	Stop          bool
+
+	current struct {
+		sync.Mutex
+		action WorkerAction
+		cancel context.CancelFunc
+	}
 }
 
 type Runner interface {
@@ -91,6 +98,45 @@ func (w *Worker) Log(format string, args ...interface{}) {
 	}
 }
 
+func (w *Worker) setCurrent(ctx context.Context, action WorkerAction) context.Context {
+	w.current.Lock()
+	defer w.current.Unlock()
+
+	if w.current.action != nil || w.current.cancel != nil {
+		panic("setCurrent called while current != nil")
+	}
+
+	actCtx, actCancel := context.WithCancel(ctx)
+	w.current.action = action
+	w.current.cancel = actCancel
+
+	return actCtx
+}
+
+func (w *Worker) ClearCurrent() {
+	w.current.Lock()
+	defer w.current.Unlock()
+
+	w.current.action = nil
+	w.current.cancel = nil
+}
+
+func (w *Worker) Current() WorkerAction {
+	w.current.Lock()
+	defer w.current.Unlock()
+
+	return w.current.action
+}
+
+func (w *Worker) CancelCurrent() {
+	w.current.Lock()
+	defer w.current.Unlock()
+
+	if w.current.cancel != nil {
+		w.current.cancel()
+	}
+}
+
 func (w *Worker) RunJob(ctx context.Context, t fuq.Task) (fuq.JobStatusUpdate, error) {
 	runner := w.Runner
 	if runner == nil {
@@ -98,6 +144,20 @@ func (w *Worker) RunJob(ctx context.Context, t fuq.Task) (fuq.JobStatusUpdate, e
 	}
 
 	return runner.Run(ctx, t, w)
+}
+
+func (w *Worker) CurrentAction() (WorkerAction, context.CancelFunc) {
+	w.current.Lock()
+	defer w.current.Unlock()
+
+	return w.current.action, w.current.cancel
+}
+
+func (w *Worker) actOnRequest(ctx context.Context, req WorkerAction) (*fuq.JobStatusUpdate, error) {
+	reqCtx := w.setCurrent(ctx, req)
+	defer w.ClearCurrent()
+
+	return req.Act(reqCtx, w)
 }
 
 func (w *Worker) Loop(ctx context.Context) {
@@ -124,7 +184,7 @@ func (w *Worker) Loop(ctx context.Context) {
 			req = WaitAction{}
 		}
 
-		upd, err := req.Act(ctx, w)
+		upd, err := w.actOnRequest(ctx, req)
 		if err == ErrStopCond {
 			return
 		}
@@ -141,5 +201,10 @@ func (w *Worker) Loop(ctx context.Context) {
 }
 
 func (w *Worker) Close() {
-	/* nop for now */
+	w.current.Lock()
+	defer w.current.Unlock()
+
+	if w.current.cancel != nil {
+		w.current.cancel()
+	}
 }

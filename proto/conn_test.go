@@ -232,6 +232,7 @@ func runTestsWithRig(mk testRigMaker, t *testing.T) {
 	t.Run("OnMessage", testWithRig(mk, OnMessageTest))
 	t.Run("SendJob", testWithRig(mk, SendJobTest))
 	t.Run("SendUpdate", testWithRig(mk, SendUpdateTest))
+	t.Run("SendCancel", testWithRig(mk, SendCancelTest))
 	t.Run("SendStop", testWithRig(mk, SendStopTest))
 	t.Run("SendHello", testWithRig(mk, SendHelloTest))
 	t.Run("SecondSendBlocksUntilReply", testWithRig(mk, SecondSendBlocksUntilReplyTest))
@@ -401,6 +402,49 @@ func SendUpdateTest(tc connTestRigger, t *testing.T) {
 	urecvPtr, ok := received.Data.(*fuq.JobStatusUpdate)
 	if !ok {
 		t.Fatalf("expected job update data, but found: %#v", received.Data)
+	}
+
+	if !reflect.DeepEqual(usend, *urecvPtr) {
+		t.Errorf("UPDATE received, but update = %v, expected %v", *urecvPtr, usend)
+	}
+
+	checkOK(t, resp, 12, 3)
+}
+
+func SendCancelTest(tc connTestRigger, t *testing.T) {
+	syncCh, mcw, mcf := tc.SyncCh(), tc.MCW(), tc.MCF()
+	received := proto.Message{}
+
+	mcf.OnMessageFunc(proto.MTypeCancel, func(msg proto.Message) proto.Message {
+		received = msg
+		tc.NilSyncCh()
+		close(syncCh)
+		return proto.OkayMessage(12, 3, msg.Seq)
+	})
+
+	ctx := tc.Context()
+	fuqtest.GoPanicOnError(ctx, mcw.ConversationLoop)
+	fuqtest.GoPanicOnError(ctx, mcf.ConversationLoop)
+
+	usend := []fuq.TaskPair{
+		{JobId: fuq.JobId(6), Task: 14},
+	}
+
+	resp, err := mcw.SendCancel(ctx, usend)
+	if err != nil {
+		t.Fatalf("error sending CANCEL: %v", err)
+	}
+
+	// channel sync: make sure received is set
+	<-syncCh
+
+	if received.Type != proto.MTypeCancel {
+		t.Fatalf("expected job cancel message")
+	}
+
+	urecvPtr, ok := received.Data.(*[]fuq.TaskPair)
+	if !ok {
+		t.Fatalf("expected job cancel data, but found: %#v", received.Data)
 	}
 
 	if !reflect.DeepEqual(usend, *urecvPtr) {

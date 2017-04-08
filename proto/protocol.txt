@@ -5,6 +5,7 @@ Message types:
      OK		- general request response
      JOB	- job data
      UPDATE	- update job status
+     CANCEL	- cancel an in-progress job
      STOP	- stop one or more workers
      RESET	- reset sequence numbers
      ERROR_xxx	- report a specific error
@@ -147,8 +148,12 @@ Message types:
 			acknowledge a message from the worker
 
      JOB	foreman	length of job data (msgpack encoded []fuq.Task list)
+
      UPDATE	worker	length of job update data (msgpack encoded
 			fuq.JobStatusUpdate)
+
+     CANCEL	foreman	length of job cancel data (msgpack encoded
+			fuq.TaskPair)
 
      STOP	foreman	nproc to stop. if 0, stop all.  if 0xFFFFFFFF,
 			stop everything immediately
@@ -189,6 +194,14 @@ Worker:
 				start job
 				reply OK(nrun|nproc)
 			else reply ERROR(no_procs)
+
+		CANCEL message:
+			if job is running:
+				stop appropriate job
+				nproc += job_nproc
+				nrun -= job_nproc
+				reply OK(nrun|nproc)
+			else reply ERROR(no_such_job)
 
 		STOP message:
 			if stop_immed, exit

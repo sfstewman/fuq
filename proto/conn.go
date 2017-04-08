@@ -366,6 +366,10 @@ func (mc *Conn) SendUpdate(ctx context.Context, update fuq.JobStatusUpdate) (Mes
 	return mc.sendMessage(ctx, MTypeUpdate, &update)
 }
 
+func (mc *Conn) SendCancel(ctx context.Context, cancel []fuq.TaskPair) (Message, error) {
+	return mc.sendMessage(ctx, MTypeCancel, &cancel)
+}
+
 func (mc *Conn) SendStop(ctx context.Context, nproc uint32) (Message, error) {
 	return mc.sendMessage(ctx, MTypeStop, nproc)
 }

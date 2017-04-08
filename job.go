@@ -203,6 +203,11 @@ type Task struct {
 	JobDescription
 }
 
+type TaskPair struct {
+	JobId JobId `json:"job_id"`
+	Task  int   `json:"task"`
+}
+
 type JobTaskData struct {
 	JobId
 	Pending       []int

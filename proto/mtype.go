@@ -12,6 +12,7 @@ const (
 	MTypeHello
 	MTypeJob
 	MTypeUpdate
+	MTypeCancel
 	MTypeStop
 	MTypeError
 	MTypeReset
@@ -29,6 +30,8 @@ func (mt MType) String() string {
 		return "Job"
 	case MTypeUpdate:
 		return "Update"
+	case MTypeCancel:
+		return "Cancel"
 	case MTypeStop:
 		return "Stop"
 	case MTypeError:
@@ -50,6 +53,8 @@ func (mt MType) GoString() string {
 		return "MType_Job"
 	case MTypeUpdate:
 		return "MType_Update"
+	case MTypeCancel:
+		return "MType_Cancel"
 	case MTypeStop:
 		return "MType_Stop"
 	case MTypeError:

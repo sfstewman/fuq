@@ -117,11 +117,20 @@ type testRunner struct {
 	T fuq.Task
 	S fuq.JobStatusUpdate
 	E error
+	C chan struct{}
 }
 
 func (r *testRunner) Run(ctx context.Context, t fuq.Task, w *Worker) (fuq.JobStatusUpdate, error) {
 	r.T = t
 	r.R++
+	if r.C != nil {
+		// wait until the context is canceled or the C channel
+		// has a send or a close
+		select {
+		case <-r.C:
+		case <-ctx.Done():
+		}
+	}
 	return r.S, r.E
 }
 
@@ -146,6 +155,7 @@ func TestLoopRun(t *testing.T) {
 			Task:    task.Task,
 			Success: true,
 		},
+		C: make(chan struct{}),
 	}
 	w.Worker.Runner = r
 
@@ -154,7 +164,16 @@ func TestLoopRun(t *testing.T) {
 		close(w.doneCh)
 	}()
 
+	act := RunAction(task)
 	w.actionCh <- RunAction(task)
+
+	// check that run is registered...
+	if curr := w.Current(); curr != act {
+		t.Errorf("expected action %v, but found %v",
+			act, curr)
+	}
+
+	close(r.C)
 
 	// blocks until run is complete
 	w.actionCh <- NopAction{}

@@ -154,7 +154,7 @@ func (m Message) Send(w io.Writer) error {
 		errData := m.Data.(mtErrorData)
 		return m.encodeError(w, errData)
 
-	case MTypeHello, MTypeJob, MTypeUpdate:
+	case MTypeHello, MTypeJob, MTypeUpdate, MTypeCancel:
 		return m.encodeData(w)
 
 	default:
@@ -180,6 +180,9 @@ func ReceiveMessage(r io.Reader) (Message, error) {
 		raw = make([]byte, h.arg0)
 	case MTypeJob:
 		m.Data = &[]fuq.Task{}
+		raw = make([]byte, h.arg0)
+	case MTypeCancel:
+		m.Data = &[]fuq.TaskPair{}
 		raw = make([]byte, h.arg0)
 	case MTypeUpdate:
 		m.Data = &fuq.JobStatusUpdate{}
