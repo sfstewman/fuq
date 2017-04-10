@@ -245,7 +245,8 @@ func newTestingServer() *Server {
 }
 
 type roundTrip struct {
-	T *testing.T
+	Cookie *http.Cookie
+	T      *testing.T
 
 	Msg    interface{}
 	Dst    interface{}
@@ -284,6 +285,9 @@ func (rt roundTrip) ExpectCode(fn func(http.ResponseWriter, *http.Request), code
 	}
 
 	req := httptest.NewRequest("POST", target, bytes.NewReader(encode))
+	if rt.Cookie != nil {
+		req.AddCookie(rt.Cookie)
+	}
 	wr := httptest.NewRecorder()
 
 	fn(wr, req)
@@ -839,8 +843,10 @@ func doNodeAuth(t *testing.T, s *Server) (fuq.NodeInfo, fuq.Cookie) {
 
 func TestServerNodeJobRequestAndUpdate(t *testing.T) {
 	s := newTestingServer()
-	// mux := SetupRoutes(s)
-	ni, _, _ := serverAuth(t, s)
+	mux := SetupRoutes(s)
+	_, cookie, _ := serverAuth(t, s)
+
+	goodCookie := fuq.AsHTTPCookie(ServerCookie, cookie, time.Now().Add(24*time.Hour))
 
 	queue := s.JobQueuer.(*simpleQueuer)
 	id, err := queue.AddJob(fuq.JobDescription{
@@ -866,31 +872,70 @@ func TestServerNodeJobRequestAndUpdate(t *testing.T) {
 	}
 
 	req := fuq.JobRequest{NumProc: 4}
-	resp := []fuq.Task{}
+	repl := []fuq.Task{}
+
+	var badCookie *http.Cookie
+	for {
+		_, badCookie = newCookieTest(t)
+		if badCookie.Value != goodCookie.Value {
+			break
+		}
+	}
+	t.Logf("good cookie = %s", goodCookie)
+	t.Logf("bad cookie = %s", badCookie)
+
+	// Check error state: no cookie
+	resp := roundTrip{
+		T:      t,
+		Msg:    req,
+		Dst:    nil,
+		Target: JobRequestPath,
+	}.ExpectCode(mux.ServeHTTP, http.StatusUnauthorized)
+	resp.Body.Close()
+
+	// Check error state: bad cookie
+	resp = roundTrip{
+		Cookie: badCookie,
+		T:      t,
+		Msg:    req,
+		Dst:    nil,
+		Target: JobRequestPath,
+	}.ExpectCode(mux.ServeHTTP, http.StatusUnauthorized)
+	resp.Body.Close()
+
+	// Check error state: bad json (message)
+	resp = roundTrip{
+		Cookie: goodCookie,
+		T:      t,
+		Msg:    []string{"foo", "bar", "baz"},
+		Dst:    nil,
+		Target: JobRequestPath,
+	}.ExpectCode(mux.ServeHTTP, http.StatusBadRequest)
+	resp.Body.Close()
+
+	// Now test success states
+
 	roundTrip{
+		Cookie: goodCookie,
 		T:      t,
 		Msg:    &req,
-		Dst:    &resp,
-		Target: "/job/request",
-	}.TestNodeHandler(s.HandleNodeJobRequest, ni)
+		Dst:    &repl,
+		Target: JobRequestPath,
+	}.ExpectOK(mux.ServeHTTP)
 	t.Logf("response is %v", resp)
 
-	if len(resp) != 4 {
-		t.Errorf("expected len(resp) == 4, but len(resp) == %d", len(resp))
+	if len(repl) != 4 {
+		t.Errorf("expected len(repl) == 4, but len(repl) == %d", len(repl))
 	}
 
 	// job should now be running...
 	job.Status = fuq.Running
-	for i, task := range resp {
-		if task.Task != i+1 {
-			t.Errorf("resp[%d].Task is %d, expected %d",
-				i, task.Task, i+1)
-		}
-
-		if task.JobDescription != job {
-			t.Errorf("resp[%d].JobDescription is %v, expected %v",
-				i, task.JobDescription, job)
-		}
+	expectedTasks := []fuq.Task{
+		{1, job}, {2, job}, {3, job}, {4, job},
+	}
+	if !reflect.DeepEqual(repl, expectedTasks) {
+		t.Fatalf("expected tasks '%v' but found '%v'",
+			expectedTasks, repl)
 	}
 
 	// ensure that the queuer is updated
@@ -932,22 +977,56 @@ func TestServerNodeJobRequestAndUpdate(t *testing.T) {
 		NewJob:  &fuq.JobRequest{NumProc: 1},
 	}
 
-	resp = []fuq.Task{}
+	// Check error states on update
+
+	// Check error state: no cookie
+	resp = roundTrip{
+		T:      t,
+		Msg:    req,
+		Dst:    nil,
+		Target: JobUpdatePath,
+	}.ExpectCode(mux.ServeHTTP, http.StatusUnauthorized)
+	resp.Body.Close()
+
+	// Check error state: bad cookie
+	resp = roundTrip{
+		Cookie: badCookie,
+		T:      t,
+		Msg:    req,
+		Dst:    nil,
+		Target: JobUpdatePath,
+	}.ExpectCode(mux.ServeHTTP, http.StatusUnauthorized)
+	resp.Body.Close()
+
+	// Check error state: bad json (message)
+	resp = roundTrip{
+		Cookie: goodCookie,
+		T:      t,
+		Msg:    []string{"foo", "bar", "baz"},
+		Dst:    nil,
+		Target: JobUpdatePath,
+	}.ExpectCode(mux.ServeHTTP, http.StatusBadRequest)
+	resp.Body.Close()
+
+	// Check successful path
+
+	repl = []fuq.Task{}
 	roundTrip{
+		Cookie: goodCookie,
 		T:      t,
 		Msg:    &upd,
-		Dst:    &resp,
-		Target: "/job/status",
-	}.TestNodeHandler(s.HandleNodeJobUpdate, ni)
+		Dst:    &repl,
+		Target: JobUpdatePath,
+	}.ExpectOK(mux.ServeHTTP)
 
 	// check update
-	if len(resp) != 1 {
-		t.Fatalf("expected len(resp) == 1, but len(resp) == %d", len(resp))
+	if len(repl) != 1 {
+		t.Fatalf("expected len(resp) == 1, but len(resp) == %d", len(repl))
 	}
 
-	if resp[0].Task != 5 || resp[0].JobDescription != job {
+	if repl[0].Task != 5 || repl[0].JobDescription != job {
 		t.Errorf("expected Task 5 of job %d, but received '%v'",
-			id, resp[0])
+			id, repl[0])
 	}
 
 	// check that queue has updated the task information
@@ -968,6 +1047,40 @@ func TestServerNodeJobRequestAndUpdate(t *testing.T) {
 		t.Fatalf("expected job status '%v', but status is '%v'",
 			status0, status)
 	}
+}
+
+func TestServerNodeJobRequestOnShutdown(t *testing.T) {
+	s := newTestingServer()
+	mux := SetupRoutes(s)
+	ni, cookie, _ := serverAuth(t, s)
+
+	goodCookie := fuq.AsHTTPCookie(ServerCookie, cookie, time.Now().Add(24*time.Hour))
+
+	wait := make(chan struct{})
+
+	go func() {
+		wait <- struct{}{}
+		req := fuq.JobRequest{NumProc: 4}
+		repl := []fuq.Task{}
+
+		roundTrip{
+			Cookie: goodCookie,
+			T:      t,
+			Msg:    &req,
+			Dst:    &repl,
+			Target: JobRequestPath,
+		}.ExpectOK(mux.ServeHTTP)
+
+		close(wait)
+	}()
+
+	// wait for goroutine to start
+	<-wait
+
+	s.ShutdownNodes([]string{ni.UniqName})
+
+	// wait for goroutine to finish
+	<-wait
 }
 
 func stdClientErrorTests(t *testing.T, h http.Handler, target string, msg interface{}) {
@@ -1051,6 +1164,9 @@ func TestServerClientJobNew(t *testing.T) {
 
 func TestServerClientJobList(t *testing.T) {
 	s := newTestingServer()
+	mux := SetupRoutes(s)
+
+	stdClientErrorTests(t, mux, ClientNodeShutdownPath, fuq.ClientNodeShutdownReq{})
 
 	jobs := []fuq.JobDescription{
 		{
@@ -1077,14 +1193,19 @@ func TestServerClientJobList(t *testing.T) {
 
 	queue := s.JobQueuer.(*simpleQueuer)
 
+	env := ClientRequestEnvelope{
+		Auth: fuq.Client{Password: testingPass, Client: "some_client"},
+		Msg:  &fuq.ClientJobListReq{},
+	}
+
 	resp := []fuq.JobTaskStatus{}
+
 	roundTrip{
 		T:      t,
-		Msg:    &fuq.ClientJobListReq{},
+		Msg:    env,
 		Dst:    &resp,
-		Target: "/client/job/list",
-	}.TestClientHandler(s.HandleClientJobList)
-	// t.Logf("response is %v", resp)
+		Target: ClientJobListPath,
+	}.ExpectOK(mux.ServeHTTP)
 
 	expectedResp := []fuq.JobTaskStatus{
 		{
@@ -1120,11 +1241,10 @@ func TestServerClientJobList(t *testing.T) {
 	resp = []fuq.JobTaskStatus{}
 	roundTrip{
 		T:      t,
-		Msg:    &fuq.ClientJobListReq{},
+		Msg:    env,
 		Dst:    &resp,
-		Target: "/client/job/list",
-	}.TestClientHandler(s.HandleClientJobList)
-	// t.Logf("response is %v", resp)
+		Target: ClientJobListPath,
+	}.ExpectOK(mux.ServeHTTP)
 
 	jobs[0].Status = fuq.Running
 	jobs[1].Status = fuq.Running
@@ -1174,10 +1294,10 @@ func TestServerClientJobList(t *testing.T) {
 	resp = []fuq.JobTaskStatus{}
 	roundTrip{
 		T:      t,
-		Msg:    &fuq.ClientJobListReq{},
+		Msg:    env,
 		Dst:    &resp,
-		Target: "/client/job/list",
-	}.TestClientHandler(s.HandleClientJobList)
+		Target: ClientJobListPath,
+	}.ExpectOK(mux.ServeHTTP)
 	t.Logf("response is %v", resp)
 
 	expectedResp = []fuq.JobTaskStatus{
@@ -1218,10 +1338,10 @@ func TestServerClientJobList(t *testing.T) {
 	resp = []fuq.JobTaskStatus{}
 	roundTrip{
 		T:      t,
-		Msg:    &fuq.ClientJobListReq{},
+		Msg:    env,
 		Dst:    &resp,
-		Target: "/client/job/list",
-	}.TestClientHandler(s.HandleClientJobList)
+		Target: ClientJobListPath,
+	}.ExpectOK(mux.ServeHTTP)
 	// t.Logf("response is %v", resp)
 
 	expectedResp = []fuq.JobTaskStatus{
@@ -1239,13 +1359,18 @@ func TestServerClientJobList(t *testing.T) {
 			expectedResp, resp)
 	}
 
+	env = ClientRequestEnvelope{
+		Auth: fuq.Client{Password: testingPass, Client: "some_client"},
+		Msg:  fuq.ClientJobListReq{Status: "finished"},
+	}
+
 	resp = []fuq.JobTaskStatus{}
 	roundTrip{
 		T:      t,
-		Msg:    &fuq.ClientJobListReq{Status: "finished"},
+		Msg:    env,
 		Dst:    &resp,
-		Target: "/client/job/list",
-	}.TestClientHandler(s.HandleClientJobList)
+		Target: ClientJobListPath,
+	}.ExpectOK(mux.ServeHTTP)
 	// t.Logf("response is %v", resp)
 
 	jobs[0].Status = fuq.Finished
@@ -1288,8 +1413,7 @@ func TestServerClientJobState(t *testing.T) {
 	}
 
 	for i, j := range jobs {
-		id := addJob(t, s.Foreman, j)
-		jobs[i].JobId = id
+		jobs[i].JobId = addJob(t, s.Foreman, j)
 		jobs[i].Status = fuq.Waiting
 	}
 
@@ -1534,6 +1658,97 @@ func TestServerClientJobState(t *testing.T) {
 	if !reflect.DeepEqual(jobs, currJobs) {
 		t.Fatalf("expected all jobs to be '%#v', but found '%#v'",
 			jobs, currJobs)
+	}
+}
+
+func TestServerClientJobClear(t *testing.T) {
+	s := newTestingServer()
+	mux := SetupRoutes(s)
+
+	jobs := []fuq.JobDescription{
+		{
+			Name:       "job1",
+			NumTasks:   16,
+			WorkingDir: "/foo/bar",
+			LoggingDir: "/foo/bar/logs",
+			Command:    "/foo/foo_it.sh",
+		},
+		{
+			Name:       "job2",
+			NumTasks:   27,
+			WorkingDir: "/foo/baz",
+			LoggingDir: "/foo/baz/logs",
+			Command:    "/foo/baz_it.sh",
+		},
+	}
+
+	for i, j := range jobs {
+		jobs[i].JobId = addJob(t, s.Foreman, j)
+		jobs[i].Status = fuq.Waiting
+	}
+
+	// First, fetch some pending tasks to start the first job
+	// running
+	queue := s.JobQueuer.(*simpleQueuer)
+
+	currJobs, err := AllJobs(queue)
+	if err != nil {
+		t.Fatalf("error fetching jobs: %v", err)
+	}
+
+	if !reflect.DeepEqual(jobs, currJobs) {
+		t.Fatalf("expected all jobs to be '%#v', but found '%#v'",
+			jobs, currJobs)
+	}
+
+	var env ClientRequestEnvelope
+
+	// Check error state: bad password
+	env = ClientRequestEnvelope{
+		Auth: fuq.Client{Password: invalidPass, Client: "testing"},
+		Msg:  nil,
+	}
+
+	resp := roundTrip{
+		T:      t,
+		Msg:    env,
+		Dst:    nil,
+		Target: ClientJobClearPath,
+	}.ExpectCode(mux.ServeHTTP, http.StatusForbidden)
+	resp.Body.Close()
+
+	// Check error state: bad json (envelope)
+	resp = roundTrip{
+		T:      t,
+		Msg:    "foo bar baz",
+		Dst:    nil,
+		Target: ClientJobClearPath,
+	}.ExpectCode(mux.ServeHTTP, http.StatusBadRequest)
+	resp.Body.Close()
+
+	// Now test success states
+
+	// : hold first job
+	env = ClientRequestEnvelope{
+		Auth: fuq.Client{Password: testingPass, Client: "testing"},
+		Msg:  nil,
+	}
+
+	roundTrip{
+		T:      t,
+		Msg:    env,
+		Dst:    nil,
+		Target: ClientJobClearPath,
+	}.ExpectOK(mux.ServeHTTP)
+
+	currJobs, err = AllJobs(queue)
+	if err != nil {
+		t.Fatalf("error fetching jobs: %v", err)
+	}
+
+	if len(currJobs) != 0 {
+		t.Fatalf("expected zero jobs, but found %d: %v",
+			len(currJobs), currJobs)
 	}
 }
 

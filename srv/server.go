@@ -54,7 +54,19 @@ func (h Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 	h.H.ServeHTTP(resp, req)
 }
 
-func AddHandler(mux *http.ServeMux, path string, handler http.HandlerFunc) {
+func AddHandler(mux *http.ServeMux, path string, handler http.Handler) {
+	if len(path) > 0 && path[0] != '/' {
+		path = "/" + path
+	}
+
+	mux.Handle(path, Handler{
+		H:      handler,
+		Method: "POST",
+		Path:   path,
+	})
+}
+
+func AddHandlerFunc(mux *http.ServeMux, path string, handler http.HandlerFunc) {
 	if len(path) > 0 && path[0] != '/' {
 		path = "/" + path
 	}
@@ -70,8 +82,8 @@ func SetupRoutes(s *Server) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	log.Printf("Adding handlers")
-	AddHandler(mux, HelloPath, s.HandleHello)
-	AddHandler(mux, NodeReauthPath, s.HandleNodeReauth)
+	AddHandlerFunc(mux, HelloPath, s.HandleHello)
+	AddHandlerFunc(mux, NodeReauthPath, s.HandleNodeReauth)
 
 	// XXX - check that this fails on no/bad cookie in tests
 	mux.Handle("/"+NodePersistentPath, Handler{
@@ -80,8 +92,8 @@ func SetupRoutes(s *Server) *http.ServeMux {
 		Path:   "/" + NodePersistentPath,
 	})
 
-	s.AddNodeHandler(mux, JobRequestPath, s.HandleNodeJobRequest)
-	s.AddNodeHandler(mux, JobUpdatePath, s.HandleNodeJobUpdate)
+	AddHandler(mux, JobRequestPath, RequireValidCookie(http.HandlerFunc(s.HandleNodeJobRequest), s))
+	AddHandler(mux, JobUpdatePath, RequireValidCookie(http.HandlerFunc(s.HandleNodeJobUpdate), s))
 
 	s.AddClientHandler(mux, ClientNodeListPath, s.HandleClientNodeList)
 	s.AddClientHandler(mux, ClientNodeShutdownPath, s.HandleClientNodeShutdown)
@@ -285,9 +297,19 @@ func (s *Server) HandleNodeReauth(resp http.ResponseWriter, req *http.Request) {
 	}{ni.UniqName, cookie})
 }
 
-func (s *Server) HandleNodeJobUpdate(resp http.ResponseWriter, req *http.Request, mesg []byte, ni fuq.NodeInfo) {
+func (s *Server) HandleNodeJobUpdate(resp http.ResponseWriter, req *http.Request) {
+	rawNI := req.Context().Value(nodeInfoKey{})
+	ni, ok := rawNI.(fuq.NodeInfo)
+	if !ok {
+		log.Printf("%s: associated node info is missing or wrong (%v)",
+			req.RemoteAddr, rawNI)
+		fuq.InternalError(resp, req)
+		return
+	}
+
 	jobUpdate := fuq.JobStatusUpdate{}
-	if err := json.Unmarshal(mesg, &jobUpdate); err != nil {
+	decoder := json.NewDecoder(req.Body)
+	if err := decoder.Decode(&jobUpdate); err != nil {
 		log.Printf("error unmarshaling job request at %s: %v",
 			req.URL, err)
 		fuq.BadRequest(resp, req)
@@ -369,11 +391,21 @@ func (s *Server) replyToRequest(resp http.ResponseWriter, req *http.Request, ni 
 	RespondWithJSON(resp, tasks)
 }
 
-func (s *Server) HandleNodeJobRequest(resp http.ResponseWriter, req *http.Request, mesg []byte, ni fuq.NodeInfo) {
+func (s *Server) HandleNodeJobRequest(resp http.ResponseWriter, req *http.Request) {
+	rawNI := req.Context().Value(nodeInfoKey{})
+	ni, ok := rawNI.(fuq.NodeInfo)
+	if !ok {
+		log.Printf("%s: associated node info is missing or wrong (%v)",
+			req.RemoteAddr, rawNI)
+		fuq.InternalError(resp, req)
+		return
+	}
+
 	jobReq := fuq.JobRequest{}
-	if err := json.Unmarshal(mesg, &jobReq); err != nil {
-		log.Printf("error unmarshaling job request at %s: %v",
-			req.URL, err)
+	decoder := json.NewDecoder(req.Body)
+	if err := decoder.Decode(&jobReq); err != nil {
+		log.Printf("%s: error unmarshaling job request at %s: %v",
+			req.RemoteAddr, req.URL, err)
 		fuq.BadRequest(resp, req)
 		return
 	}
@@ -669,38 +701,6 @@ func (s *Server) HandleClientShutdown(resp http.ResponseWriter, req *http.Reques
 	RespondWithJSON(resp, struct{ ok bool }{true})
 }
 
-func (s *Server) AddNodeHandler(mux *http.ServeMux, path string, handler NodeRequestHandler) {
-	AddHandler(mux, path, http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
-		msg := json.RawMessage{}
-		envelope := NodeRequestEnvelope{Msg: &msg}
-
-		dec := json.NewDecoder(req.Body)
-		if err := dec.Decode(&envelope); err != nil {
-			log.Printf("error unmarshaling node request at %s: %v",
-				req.URL, err)
-			fuq.BadRequest(resp, req)
-			return
-		}
-
-		// check cookie
-		ni, err := s.Lookup(envelope.Cookie)
-		if err != nil {
-			log.Printf("error looking up cookie: %v", err)
-			fuq.InternalError(resp, req)
-			return
-		}
-
-		log.Printf("cookie %s from node %v", envelope.Cookie, ni)
-
-		if ni.Node == "" {
-			fuq.Forbidden(resp, req)
-			return
-		}
-
-		handler(resp, req, []byte(msg), ni)
-	}))
-}
-
 func (s *Server) AddClientHandler(mux *http.ServeMux, path string, handler ClientRequestHandler) {
 	AddHandler(mux, path, http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		msg := json.RawMessage{}
@@ -716,7 +716,7 @@ func (s *Server) AddClientHandler(mux *http.ServeMux, path string, handler Clien
 
 		// check auth
 		if !s.CheckClient(envelope.Auth) {
-			log.Printf("%s: invalid client auth %v", req.RemoteAddr)
+			log.Printf("%s: invalid client auth", req.RemoteAddr)
 			fuq.Forbidden(resp, req)
 			return
 		}
