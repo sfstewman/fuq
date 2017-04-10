@@ -163,6 +163,10 @@ func (f *Foreman) AllShutdownNodes() []string {
 	f.shutdownReq.mu.RLock()
 	defer f.shutdownReq.mu.RUnlock()
 
+	if len(f.shutdownReq.shutdownHost) == 0 {
+		return nil
+	}
+
 	nodes := make([]string, len(f.shutdownReq.shutdownHost))
 	count := 0
 	for h, _ := range f.shutdownReq.shutdownHost {
@@ -212,7 +216,7 @@ func (f *Foreman) fetchNextTasks(ctx context.Context, nproc int, ni fuq.NodeInfo
 
 		select {
 		case <-ctx.Done():
-			return nil, nil
+			return nil, ctx.Err()
 		case <-jobsAvail:
 			continue
 		}

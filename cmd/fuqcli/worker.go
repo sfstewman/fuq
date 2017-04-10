@@ -5,15 +5,13 @@ import (
 	"flag"
 	"fmt"
 	"github.com/sfstewman/fuq"
+	"github.com/sfstewman/fuq/srv"
 	"os"
 )
 
 func workerListCmd(cfg fuq.Config, args []string) error {
 	var outputJSON = false
-	var msg struct {
-		CookieList bool `json:"cookie_list"`
-		JobList    bool `json:"job_list"`
-	}
+	var msg fuq.ClientNodeListReq
 
 	flags := flag.NewFlagSet("workerList", flag.ContinueOnError)
 	flags.BoolVar(&outputJSON, "j", outputJSON, "output json response")
@@ -36,7 +34,7 @@ func workerListCmd(cfg fuq.Config, args []string) error {
 	}
 
 	ret := []fuq.NodeInfo{}
-	if err := callEndpoint(cfg, "client/nodes/list", msg, &ret); err != nil {
+	if err := callEndpoint(cfg, srv.ClientNodeListPath, msg, &ret); err != nil {
 		return fmt.Errorf("Error encountered listing worker nodes: %v", err)
 	}
 
@@ -138,13 +136,9 @@ func workerStopCmd(cfg fuq.Config, args []string) error {
 		fmt.Println()
 	}
 
-	msg := struct {
-		UniqNames []string `json:"uniq_names"`
-	}{
-		UniqNames: names,
-	}
+	msg := fuq.ClientNodeShutdownReq{UniqNames: names}
 
-	if err := callEndpoint(cfg, "client/nodes/shutdown", &msg, nil); err != nil {
+	if err := callEndpoint(cfg, srv.ClientNodeShutdownPath, &msg, nil); err != nil {
 		return fmt.Errorf("Error encountered shutting down worker nodes: %v", err)
 	}
 

@@ -17,15 +17,31 @@ const (
 	ServerCookie    = `fuq_foreman_auth`
 	ServerCookieAge = 14 * 24 * time.Hour
 	MaxCookieLength = 128
+
+	HelloPath              = "hello"
+	NodeReauthPath         = "node/reauth"
+	NodePersistentPath     = "node/persistent"
+	JobRequestPath         = "job/request"
+	JobUpdatePath          = "job/update"
+	ClientNodeListPath     = "client/nodes/list"
+	ClientNodeShutdownPath = "client/nodes/shutdown"
+	ClientJobListPath      = "client/job/list"
+	ClientJobNewPath       = "client/job/new"
+	ClientJobClearPath     = "client/job/clear"
+	ClientJobStatePath     = "client/job/state"
+	ClientShutdownPath     = "client/shutdown"
 )
 
+type nodeInfoKey struct{}
+
 type Handler struct {
-	H    http.Handler
-	Path string
+	H      http.Handler
+	Method string
+	Path   string
 }
 
 func (h Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
-	if req.Method != "POST" {
+	if req.Method != h.Method {
 		fuq.BadMethod(resp, req)
 		return
 	}
@@ -39,36 +55,52 @@ func (h Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 }
 
 func AddHandler(mux *http.ServeMux, path string, handler http.HandlerFunc) {
+	if len(path) > 0 && path[0] != '/' {
+		path = "/" + path
+	}
+
 	mux.Handle(path, Handler{
-		H:    handler,
-		Path: path,
+		H:      handler,
+		Method: "POST",
+		Path:   path,
 	})
+}
+
+func SetupRoutes(s *Server) *http.ServeMux {
+	mux := http.NewServeMux()
+
+	log.Printf("Adding handlers")
+	AddHandler(mux, HelloPath, s.HandleHello)
+	AddHandler(mux, NodeReauthPath, s.HandleNodeReauth)
+
+	// XXX - check that this fails on no/bad cookie in tests
+	mux.Handle("/"+NodePersistentPath, Handler{
+		H:      RequireValidCookie(http.HandlerFunc(s.HandleNodePersistent), s),
+		Method: "GET",
+		Path:   "/" + NodePersistentPath,
+	})
+
+	s.AddNodeHandler(mux, JobRequestPath, s.HandleNodeJobRequest)
+	s.AddNodeHandler(mux, JobUpdatePath, s.HandleNodeJobUpdate)
+
+	s.AddClientHandler(mux, ClientNodeListPath, s.HandleClientNodeList)
+	s.AddClientHandler(mux, ClientNodeShutdownPath, s.HandleClientNodeShutdown)
+
+	s.AddClientHandler(mux, ClientJobListPath, s.HandleClientJobList)
+	s.AddClientHandler(mux, ClientJobNewPath, s.HandleClientJobNew)
+	s.AddClientHandler(mux, ClientJobClearPath, s.HandleClientJobClear)
+	s.AddClientHandler(mux, ClientJobStatePath, s.HandleClientJobState)
+
+	s.AddClientHandler(mux, ClientShutdownPath, s.HandleClientShutdown)
+
+	return mux
 }
 
 func StartAPIServer(s *Server, config fuq.Config) error {
 	log.Printf("Starting API server on %s:%d",
 		config.Foreman, config.Port)
 
-	mux := http.NewServeMux()
-
-	log.Printf("Adding handlers")
-	AddHandler(mux, "/hello", s.HandleHello)
-	AddHandler(mux, "/node/reauth", s.HandleNodeReauth)
-	// AddHandler(mux, "/node/persistent", s.HandleNodePersistent)
-	mux.HandleFunc("/node/persistent", s.HandleNodePersistent)
-
-	s.AddNodeHandler(mux, "/job/request", s.HandleNodeJobRequest)
-	s.AddNodeHandler(mux, "/job/status", s.HandleNodeJobUpdate)
-
-	s.AddClientHandler(mux, "/client/nodes/list", s.HandleClientNodeList)
-	s.AddClientHandler(mux, "/client/nodes/shutdown", s.HandleClientNodeShutdown)
-
-	s.AddClientHandler(mux, "/client/job/list", s.HandleClientJobList)
-	s.AddClientHandler(mux, "/client/job/new", s.HandleClientJobNew)
-	s.AddClientHandler(mux, "/client/job/clear", s.HandleClientJobClear)
-	s.AddClientHandler(mux, "/client/job/state", s.HandleClientJobState)
-
-	s.AddClientHandler(mux, "/client/shutdown", s.HandleClientShutdown)
+	mux := SetupRoutes(s)
 
 	tlsConfig, err := fuq.SetupTLS(config)
 	if err != nil {
@@ -128,40 +160,6 @@ func NewServer(opts ServerOpts) (*Server, error) {
 	}, nil
 }
 
-func (s *Server) checkCookie(resp http.ResponseWriter, req *http.Request) *fuq.NodeInfo {
-	cookie, err := req.Cookie(ServerCookie)
-	if err != nil {
-		log.Printf("%s: missing session cookie (cookies = %v)",
-			req.RemoteAddr, req.Cookies())
-		http.Error(resp, "missing session cookie", http.StatusUnauthorized)
-		return nil
-	}
-
-	cookieData := fuq.Cookie(cookie.Value)
-	if len(cookieData) > MaxCookieLength {
-		log.Printf("%s: cookie is too long (%d bytes)", req.RemoteAddr, len(cookieData))
-		http.Error(resp, "cannot validate cookie", http.StatusUnauthorized)
-		return nil
-	}
-
-	ni, err := s.Lookup(cookieData)
-	if err != nil {
-		log.Printf("%s: error looking up cookie: %v", req.RemoteAddr, err)
-		http.Error(resp, "cannot validate cookie", http.StatusUnauthorized)
-		return nil
-	}
-
-	if ni.Node == "" {
-		log.Printf("%s: cookie '%s' not found", req.RemoteAddr, cookieData)
-		http.Error(resp, "cannot validate cookie", http.StatusForbidden)
-		return nil
-	}
-
-	log.Printf("%s: cookie %s from node %v", req.RemoteAddr, cookieData, ni)
-
-	return &ni
-}
-
 func (s *Server) CheckAuth(cred string) bool {
 	return s.Auth.CheckAuth(cred)
 }
@@ -171,15 +169,9 @@ func (s *Server) CheckClient(client fuq.Client) bool {
 }
 
 func (s *Server) addAuthCookie(resp http.ResponseWriter, cookie fuq.Cookie) {
-	respCookie := http.Cookie{
-		Name:    ServerCookie,
-		Value:   string(cookie),
-		Expires: time.Now().Add(ServerCookieAge),
-		Path:    "/",
-		// Secure:   true,
-		HttpOnly: true,
-	}
-	http.SetCookie(resp, &respCookie)
+	expires := time.Now().Add(ServerCookieAge)
+	respCookie := fuq.AsHTTPCookie(ServerCookie, cookie, expires)
+	http.SetCookie(resp, respCookie)
 }
 
 func (s *Server) HandleHello(resp http.ResponseWriter, req *http.Request) {
@@ -234,20 +226,34 @@ func (s *Server) HandleNodeReauth(resp http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	log.Printf("received REAUTH request from %s, env=%#v, hello=%#v", req.Host, envelope, hello)
+	log.Printf("received REAUTH request from %s, env=%#v, hello=%#v", req.RemoteAddr, envelope, hello)
 
 	// check cookie
 	ni, err := s.Lookup(envelope.Cookie)
 	if err != nil {
 		log.Printf("error looking up cookie: %v", err)
-		fuq.InternalError(resp, req)
+		fuq.Forbidden(resp, req)
 		return
 	}
 
-	if ni.Node != "" {
-		if err := s.ExpireCookie(envelope.Cookie); err != nil {
-			log.Printf("error expiring cookie: %v", err)
-		}
+	switch {
+	case ni.Node == "":
+		log.Printf("REAUTH from %s: stored node name is empty, aborting", req.RemoteAddr)
+		fuq.InternalError(resp, req)
+		return
+
+	case ni.UniqName != hello.NodeInfo.UniqName:
+		fallthrough
+	case ni.Node != hello.NodeInfo.Node:
+		log.Printf("request (%s,%s) node and unique_name don't agree with stored (%s,%s)",
+			hello.NodeInfo.Node, hello.NodeInfo.UniqName,
+			ni.Node, ni.UniqName)
+		fuq.Forbidden(resp, req)
+		return
+	}
+
+	if err := s.ExpireCookie(envelope.Cookie); err != nil {
+		log.Printf("error expiring cookie: %v", err)
 	}
 
 	/* check authentication */
@@ -385,44 +391,46 @@ func (s *Server) http2Convo(resp http.ResponseWriter, req *http.Request, ni fuq.
 */
 
 func (s *Server) HandleNodePersistent(resp http.ResponseWriter, req *http.Request) {
-	log.Printf("-- HandleNodePersistent --")
+	log.Printf("%s: HandleNodePersistent", req.RemoteAddr)
 	if req.Proto == "HTTP/2.0" {
 		http.Error(resp, "http/2 support not implemented", http.StatusNotImplemented)
 		return
 	}
 
-	log.Print("  . Checking cookie")
-	// XXX - check that this fails on no/bad cookie in tests
-	niPtr := s.checkCookie(resp, req)
-	if niPtr == nil {
-		log.Printf("%s: invalid cookie", req.RemoteAddr)
-		return
-	}
-
-	log.Print("  . Upgrading connection to websocket")
+	log.Printf("%s: upgrading connection to websocket", req.RemoteAddr)
 	messenger, err := websocket.Upgrade(resp, req)
 	if err != nil {
 		log.Printf("%s: error upgrading connection: %v",
 			req.RemoteAddr, err)
 		return
 	}
+
 	defer func() {
 		if !messenger.IsClosed() {
 			messenger.Close()
 		}
 	}()
 
-	// spin up a persistent connection...
+	rawNI := req.Context().Value(nodeInfoKey{})
+	ni, ok := rawNI.(fuq.NodeInfo)
+	if !ok {
+		log.Printf("%s: associated node info is missing or wrong (%v)",
+			req.RemoteAddr, rawNI)
+		fuq.InternalError(resp, req)
+		return
+	}
 
-	log.Print("  . Spinning up consistent connection")
+	// spin up a persistent connection...
+	log.Print("%s: spinning up consistent connection", req.RemoteAddr)
 	ctx := req.Context()
 	loopCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	messenger.Timeout = 5 * time.Minute
+
 	// XXX - deal with errors
 	go messenger.Heartbeat(loopCtx)
-	pc := newPersistentConn(s.Foreman, *niPtr, messenger)
+	pc := newPersistentConn(s.Foreman, ni, messenger)
 
 	s.Foreman.connections.AddConn(pc)
 	defer s.Foreman.connections.DelConn(pc)
@@ -430,9 +438,9 @@ func (s *Server) HandleNodePersistent(resp http.ResponseWriter, req *http.Reques
 	err = pc.Loop(loopCtx)
 
 	if err != nil {
-		log.Printf("%s connection error: %v", req.RemoteAddr, err)
+		log.Printf("%s: connection error: %v", req.RemoteAddr, err)
 	} else {
-		log.Printf("%s connection finished", req.RemoteAddr)
+		log.Printf("%s: connection finished", req.RemoteAddr)
 	}
 }
 
@@ -621,6 +629,18 @@ func (s *Server) HandleClientJobState(resp http.ResponseWriter, req *http.Reques
 	}
 
 	/* XXX - this uses N transactions when we could do it in one. */
+
+	// check that all job ids are valid...
+	for _, jobId := range stateChange.JobIds {
+		_, err = s.FetchJobId(jobId)
+		if err != nil {
+			log.Printf("%s: error fetching job id %d: %v",
+				req.RemoteAddr, jobId, err)
+			fuq.BadRequest(resp, req)
+			return
+		}
+	}
+
 	ret := make([]fuq.JobStateChangeResponse, len(stateChange.JobIds))
 	for i, jobId := range stateChange.JobIds {
 		prevState, err = s.ChangeJobState(jobId, newState)
@@ -696,7 +716,7 @@ func (s *Server) AddClientHandler(mux *http.ServeMux, path string, handler Clien
 
 		// check auth
 		if !s.CheckClient(envelope.Auth) {
-			log.Printf("invalid client auth %v", envelope.Auth)
+			log.Printf("%s: invalid client auth %v", req.RemoteAddr)
 			fuq.Forbidden(resp, req)
 			return
 		}

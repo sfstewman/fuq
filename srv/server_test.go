@@ -9,6 +9,7 @@ import (
 	"github.com/sfstewman/fuq/fuqtest"
 	"github.com/sfstewman/fuq/proto"
 	"github.com/sfstewman/fuq/websocket"
+	"io/ioutil"
 	"math/rand"
 	"net/http"
 	"net/http/cookiejar"
@@ -20,14 +21,16 @@ import (
 	"time"
 )
 
-type okAuth struct{}
-
-func (okAuth) CheckAuth(cred string) bool {
-	return true
+type simpleAuth struct {
+	cred string
 }
 
-func (okAuth) CheckClient(client fuq.Client) bool {
-	return true
+func (s simpleAuth) CheckAuth(cred string) bool {
+	return cred == s.cred
+}
+
+func (s simpleAuth) CheckClient(client fuq.Client) bool {
+	return client.Password == s.cred
 }
 
 type simpleCookieJar struct {
@@ -218,9 +221,17 @@ func (jar *simpleCookieJar) AllNodes() ([]fuq.NodeInfo, error) {
 	return nodes, nil
 }
 
+const (
+	// very secure testing password
+	testingPass = `dummy_auth1`
+
+	// invalid password
+	invalidPass = `foobarbaz`
+)
+
 func newTestingServer() *Server {
 	s, err := NewServer(ServerOpts{
-		Auth:        okAuth{},
+		Auth:        simpleAuth{testingPass},
 		Queuer:      &simpleQueuer{},
 		CookieMaker: newSimpleCookieJar(),
 		Done:        make(chan struct{}),
@@ -241,7 +252,25 @@ type roundTrip struct {
 	Target string
 }
 
-func (rt roundTrip) TestHandler(fn func(http.ResponseWriter, *http.Request)) *http.Response {
+func (rt roundTrip) ExpectOK(fn func(http.ResponseWriter, *http.Request)) *http.Response {
+	t := rt.T
+
+	resp := rt.ExpectCode(fn, http.StatusOK)
+	defer resp.Body.Close()
+
+	if rt.Dst == nil {
+		return resp
+	}
+
+	dec := json.NewDecoder(resp.Body)
+	if err := dec.Decode(rt.Dst); err != nil {
+		t.Fatalf("error unmarshaling response: %v", err)
+	}
+
+	return resp
+}
+
+func (rt roundTrip) ExpectCode(fn func(http.ResponseWriter, *http.Request), code int) *http.Response {
 	t := rt.T
 
 	encode, err := json.Marshal(rt.Msg)
@@ -249,21 +278,21 @@ func (rt roundTrip) TestHandler(fn func(http.ResponseWriter, *http.Request)) *ht
 		t.Fatalf("error marshaling message: %v", err)
 	}
 
-	req := httptest.NewRequest("POST", rt.Target, bytes.NewReader(encode))
+	target := rt.Target
+	if len(target) > 0 && target[0] != '/' {
+		target = "/" + target
+	}
+
+	req := httptest.NewRequest("POST", target, bytes.NewReader(encode))
 	wr := httptest.NewRecorder()
 
 	fn(wr, req)
 
 	resp := wr.Result()
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("response was '%s', not OK", resp.Status)
-	}
-
-	dec := json.NewDecoder(resp.Body)
-	if err := dec.Decode(rt.Dst); err != nil {
-		t.Fatalf("error unmarshaling response: %v", err)
+	if resp.StatusCode != code {
+		t.Fatalf("response was '%s', not %s",
+			resp.Status, http.StatusText(code))
 	}
 
 	return resp
@@ -287,7 +316,12 @@ func (rt roundTrip) TestClientHandler(fn func(http.ResponseWriter, *http.Request
 		t.Fatalf("error marshaling client request: %v", err)
 	}
 
-	req := httptest.NewRequest("POST", rt.Target, bytes.NewReader(encode))
+	target := rt.Target
+	if len(target) > 0 && target[0] != '/' {
+		target = "/" + target
+	}
+
+	req := httptest.NewRequest("POST", target, bytes.NewReader(encode))
 	wr := httptest.NewRecorder()
 
 	fn(wr, req, mesg)
@@ -347,7 +381,7 @@ func sendHello(t *testing.T, s *Server, hello fuq.Hello, envp *HelloResponseEnv)
 		Msg:    &hello,
 		Dst:    envp,
 		Target: "/hello",
-	}.TestHandler(s.HandleHello)
+	}.ExpectOK(s.HandleHello)
 }
 
 func checkCookieInfo(t *testing.T, s *Server, cookie fuq.Cookie, ni fuq.NodeInfo) {
@@ -377,6 +411,14 @@ func checkCookieInfo(t *testing.T, s *Server, cookie fuq.Cookie, ni fuq.NodeInfo
 	if !reflect.DeepEqual(ni, ni2) {
 		t.Fatalf("node info is different: expected %v but found %v",
 			ni, ni2)
+	}
+}
+
+func checkNoCookies(t *testing.T, resp *http.Response) {
+	// make sure we have no cookies attached
+	if cookies := resp.Cookies(); len(cookies) > 0 {
+		t.Fatalf("expected zero cookies attached, but found %d, cookies=%v",
+			len(cookies), cookies)
 	}
 }
 
@@ -417,15 +459,16 @@ func checkWebCookie(t *testing.T, cookie fuq.Cookie, resp *http.Response) {
 	t.Fatalf("could not find Foreman cookie named '%s'", ServerCookie)
 }
 
-func TestServerHello(t *testing.T) {
+func TestServerHelloSuccess(t *testing.T) {
 	s := newTestingServer()
 
 	ni := makeNodeInfo()
 	hello := fuq.Hello{
-		Auth:     "dummy_auth",
+		Auth:     testingPass,
 		NodeInfo: ni,
 	}
 
+	/* test success case */
 	env := HelloResponseEnv{}
 	resp := sendHello(t, s, hello, &env)
 
@@ -440,11 +483,49 @@ func TestServerHello(t *testing.T) {
 	checkWebCookie(t, cookie, resp)
 }
 
-func TestServerNodeReauth(t *testing.T) {
+func TestServerHelloBadRequest(t *testing.T) {
+	s := newTestingServer()
+
+	// test bad request (unexpected json): should return BadRequest result
+	resp := roundTrip{
+		T:      t,
+		Msg:    []string{"foo", "bar"},
+		Dst:    nil,
+		Target: "/hello",
+	}.ExpectCode(s.HandleHello, http.StatusBadRequest)
+	defer resp.Body.Close()
+
+	// make sure we have no cookies attached to the response
+	checkNoCookies(t, resp)
+}
+
+func TestServerHelloBadPass(t *testing.T) {
+	s := newTestingServer()
+
+	ni := makeNodeInfo()
+	hello := fuq.Hello{
+		Auth:     invalidPass,
+		NodeInfo: ni,
+	}
+
+	// test bad password: should return Forbidden result
+	resp := roundTrip{
+		T:      t,
+		Msg:    &hello,
+		Dst:    nil,
+		Target: "/hello",
+	}.ExpectCode(s.HandleHello, http.StatusForbidden)
+	defer resp.Body.Close()
+
+	// make sure we have no cookies attached to the response
+	checkNoCookies(t, resp)
+}
+
+func TestServerNodeReauthSuccess(t *testing.T) {
 	s := newTestingServer()
 	ni := makeNodeInfo()
 	hello := fuq.Hello{
-		Auth:     "dummy_auth",
+		Auth:     testingPass,
 		NodeInfo: ni,
 	}
 	env := HelloResponseEnv{}
@@ -465,7 +546,7 @@ func TestServerNodeReauth(t *testing.T) {
 		Msg:    &reqEnv,
 		Dst:    &ret,
 		Target: "/node/reauth",
-	}.TestHandler(s.HandleNodeReauth)
+	}.ExpectOK(s.HandleNodeReauth)
 
 	if ret.Name == nil || ret.Cookie == nil {
 		t.Fatalf("reauth response is incomplete: %#v", env)
@@ -476,10 +557,255 @@ func TestServerNodeReauth(t *testing.T) {
 	checkWebCookie(t, newCookie, resp)
 }
 
-func serverAuth(t *testing.T, s *Server) (fuq.NodeInfo, fuq.Cookie, *http.Response) {
-	ni := makeNodeInfo()
+func TestServerNodeReauthBadRequest(t *testing.T) {
+	s := newTestingServer()
+	ni, _, _ := serverAuth(t, s)
+
+	// send bad/unexpected json
+	reqEnv := []fuq.Hello{{Auth: testingPass, NodeInfo: ni}}
+
+	resp := roundTrip{
+		T:      t,
+		Msg:    &reqEnv,
+		Target: "/node/reauth",
+	}.ExpectCode(s.HandleNodeReauth, http.StatusBadRequest)
+	defer resp.Body.Close()
+
+	// make sure we have no cookies attached to the response
+	checkNoCookies(t, resp)
+}
+
+func TestServerNodeReauthEmptyCookie(t *testing.T) {
+	s := newTestingServer()
+	ni, _, _ := serverAuth(t, s)
+
+	reqEnv := NodeRequestEnvelope{
+		// no Cookie field: make sure empty cookie fails
+		Msg: &fuq.Hello{
+			Auth:     testingPass,
+			NodeInfo: ni,
+		},
+	}
+
+	resp := roundTrip{
+		T:      t,
+		Msg:    &reqEnv,
+		Target: "/node/reauth",
+	}.ExpectCode(s.HandleNodeReauth, http.StatusForbidden)
+	defer resp.Body.Close()
+
+	// make sure we have no cookies attached to the response
+	checkNoCookies(t, resp)
+}
+
+func TestServerNodeReauthBadCookie(t *testing.T) {
+	s := newTestingServer()
+	ni, cookie, _ := serverAuth(t, s)
+
+	badCookie := "AAAAAAA"
+	for string(cookie) == badCookie {
+		badCookie = badCookie + "_1"
+	}
+
+	reqEnv := NodeRequestEnvelope{
+		Cookie: fuq.Cookie(badCookie),
+		Msg: &fuq.Hello{
+			Auth:     testingPass,
+			NodeInfo: ni,
+		},
+	}
+
+	resp := roundTrip{
+		T:      t,
+		Msg:    &reqEnv,
+		Target: "/node/reauth",
+	}.ExpectCode(s.HandleNodeReauth, http.StatusForbidden)
+	defer resp.Body.Close()
+
+	// make sure we have no cookies attached to the response
+	checkNoCookies(t, resp)
+}
+
+func TestServerNodeReauthBadPassword(t *testing.T) {
+	s := newTestingServer()
+	ni, cookie, _ := serverAuth(t, s)
+
+	reqEnv := NodeRequestEnvelope{
+		Cookie: fuq.Cookie(cookie),
+		Msg: &fuq.Hello{
+			Auth:     invalidPass,
+			NodeInfo: ni,
+		},
+	}
+
+	resp := roundTrip{
+		T:      t,
+		Msg:    &reqEnv,
+		Target: "/node/reauth",
+	}.ExpectCode(s.HandleNodeReauth, http.StatusForbidden)
+	defer resp.Body.Close()
+
+	// make sure we have no cookies attached to the response
+	checkNoCookies(t, resp)
+}
+
+func TestServerNodeReauthInvalidNode(t *testing.T) {
+	s := newTestingServer()
+	ni, cookie, _ := serverAuth(t, s)
+
+	badNodeInfo := ni
+	badNodeInfo.Node = "robocop"
+	reqEnv := NodeRequestEnvelope{
+		Cookie: fuq.Cookie(cookie),
+		Msg: &fuq.Hello{
+			Auth:     testingPass,
+			NodeInfo: badNodeInfo,
+		},
+	}
+
+	resp := roundTrip{
+		T:      t,
+		Msg:    &reqEnv,
+		Target: "/node/reauth",
+	}.ExpectCode(s.HandleNodeReauth, http.StatusForbidden)
+	defer resp.Body.Close()
+
+	// make sure we have no cookies attached to the response
+	checkNoCookies(t, resp)
+}
+
+func TestServerNodeReauthInvalidUniqName(t *testing.T) {
+	s := newTestingServer()
+	ni, cookie, _ := serverAuth(t, s)
+
+	badNodeInfo := ni
+	badNodeInfo.UniqName = "robocop:1"
+	reqEnv := NodeRequestEnvelope{
+		Cookie: fuq.Cookie(cookie),
+		Msg: &fuq.Hello{
+			Auth:     testingPass,
+			NodeInfo: badNodeInfo,
+		},
+	}
+
+	resp := roundTrip{
+		T:      t,
+		Msg:    &reqEnv,
+		Target: "/node/reauth",
+	}.ExpectCode(s.HandleNodeReauth, http.StatusForbidden)
+	defer resp.Body.Close()
+
+	// make sure we have no cookies attached to the response
+	checkNoCookies(t, resp)
+}
+
+func newCookieTest(t *testing.T) (http.Handler, *http.Cookie) {
+	s := newTestingServer()
+	_, _, resp := serverAuth(t, s)
+	cookies := resp.Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("expected one web cookies, found %d: %v",
+			len(cookies), cookies)
+	}
+
+	handler := RequireValidCookie(
+		http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+			fmt.Fprintf(resp, "OK")
+		}), s)
+
+	return handler, cookies[0]
+}
+
+func TestRequireValidCookieSuccess(t *testing.T) {
+	handler, cookie := newCookieTest(t)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.AddCookie(cookie)
+	wr := httptest.NewRecorder()
+
+	handler.ServeHTTP(wr, req)
+	resp := wr.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("response was '%s', not OK", resp.Status)
+	}
+}
+
+func TestRequireValidCookieMissingCookie(t *testing.T) {
+	handler, _ := newCookieTest(t)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	// don't add cookie
+	wr := httptest.NewRecorder()
+
+	handler.ServeHTTP(wr, req)
+	resp := wr.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("response was '%s', not Unauthorized", resp.Status)
+	}
+}
+
+func TestRequireValidCookieInvalidCookie(t *testing.T) {
+	var badCookie *http.Cookie
+
+	handler, goodCookie := newCookieTest(t)
+
+	// construct a bad cookie by auth'ing to a new server, then
+	for {
+		_, badCookie = newCookieTest(t)
+		if badCookie.Value != goodCookie.Value {
+			break
+		}
+	}
+	t.Logf("good cookie = %s", goodCookie)
+	t.Logf("bad cookie = %s", badCookie)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.AddCookie(badCookie)
+	wr := httptest.NewRecorder()
+
+	handler.ServeHTTP(wr, req)
+	resp := wr.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("response was '%s', not Unauthorized", resp.Status)
+	}
+}
+
+func TestRequireValidCookieInvalidNode(t *testing.T) {
+	s := newTestingServer()
+	jar := s.CookieMaker.(*simpleCookieJar)
+	handler := RequireValidCookie(
+		http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+			fmt.Fprintf(resp, "OK")
+		}), s)
+
+	cookie, err := jar.MakeCookie(fuq.NodeInfo{})
+	if err != nil {
+		t.Fatalf("error making cookies with empty NodeInfo: %v", err)
+	}
+
+	webCookie := fuq.AsHTTPCookie(ServerCookie, cookie, time.Now().Add(24*time.Hour))
+	req := httptest.NewRequest("GET", "/", nil)
+	req.AddCookie(webCookie)
+	wr := httptest.NewRecorder()
+
+	handler.ServeHTTP(wr, req)
+	resp := wr.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("response was '%s', not Forbidden", resp.Status)
+	}
+}
+
+func serverAuthWithInfo(t *testing.T, s *Server, ni fuq.NodeInfo) (fuq.NodeInfo, fuq.Cookie, *http.Response) {
 	hello := fuq.Hello{
-		Auth:     "dummy_auth",
+		Auth:     testingPass,
 		NodeInfo: ni,
 	}
 	env := HelloResponseEnv{}
@@ -489,6 +815,16 @@ func serverAuth(t *testing.T, s *Server) (fuq.NodeInfo, fuq.Cookie, *http.Respon
 	cookie := *env.Cookie
 
 	return ni, cookie, resp
+}
+
+func serverAuthNode(t *testing.T, s *Server, node string) (fuq.NodeInfo, fuq.Cookie, *http.Response) {
+	ni := makeNodeInfoWithName(node)
+	return serverAuthWithInfo(t, s, ni)
+}
+
+func serverAuth(t *testing.T, s *Server) (fuq.NodeInfo, fuq.Cookie, *http.Response) {
+	ni := makeNodeInfo()
+	return serverAuthWithInfo(t, s, ni)
 }
 
 func doNodeAuth(t *testing.T, s *Server) (fuq.NodeInfo, fuq.Cookie) {
@@ -503,8 +839,8 @@ func doNodeAuth(t *testing.T, s *Server) (fuq.NodeInfo, fuq.Cookie) {
 
 func TestServerNodeJobRequestAndUpdate(t *testing.T) {
 	s := newTestingServer()
-	ni, cookie, _ := serverAuth(t, s)
-	_ = cookie
+	// mux := SetupRoutes(s)
+	ni, _, _ := serverAuth(t, s)
 
 	queue := s.JobQueuer.(*simpleQueuer)
 	id, err := queue.AddJob(fuq.JobDescription{
@@ -543,6 +879,8 @@ func TestServerNodeJobRequestAndUpdate(t *testing.T) {
 		t.Errorf("expected len(resp) == 4, but len(resp) == %d", len(resp))
 	}
 
+	// job should now be running...
+	job.Status = fuq.Running
 	for i, task := range resp {
 		if task.Task != i+1 {
 			t.Errorf("resp[%d].Task is %d, expected %d",
@@ -551,7 +889,7 @@ func TestServerNodeJobRequestAndUpdate(t *testing.T) {
 
 		if task.JobDescription != job {
 			t.Errorf("resp[%d].JobDescription is %v, expected %v",
-				task.JobDescription, job)
+				i, task.JobDescription, job)
 		}
 	}
 
@@ -632,8 +970,50 @@ func TestServerNodeJobRequestAndUpdate(t *testing.T) {
 	}
 }
 
+func stdClientErrorTests(t *testing.T, h http.Handler, target string, msg interface{}) {
+	var env ClientRequestEnvelope
+
+	// Check error state: bad password
+	env = ClientRequestEnvelope{
+		Auth: fuq.Client{Password: invalidPass, Client: "testing"},
+		Msg:  msg,
+	}
+
+	resp := roundTrip{
+		T:      t,
+		Msg:    env,
+		Dst:    nil,
+		Target: target,
+	}.ExpectCode(h.ServeHTTP, http.StatusForbidden)
+	resp.Body.Close()
+
+	// Check error state: bad json (envelope)
+	resp = roundTrip{
+		T:      t,
+		Msg:    "foo bar baz",
+		Dst:    nil,
+		Target: target,
+	}.ExpectCode(h.ServeHTTP, http.StatusBadRequest)
+	resp.Body.Close()
+
+	// Check error state: bad json (message)
+	env = ClientRequestEnvelope{
+		Auth: fuq.Client{Password: testingPass, Client: "testing"},
+		Msg:  []string{"foo", "bar", "baz"},
+	}
+
+	resp = roundTrip{
+		T:      t,
+		Msg:    env,
+		Dst:    nil,
+		Target: target,
+	}.ExpectCode(h.ServeHTTP, http.StatusBadRequest)
+	resp.Body.Close()
+}
+
 func TestServerClientJobNew(t *testing.T) {
 	s := newTestingServer()
+	mux := SetupRoutes(s)
 
 	job0 := fuq.JobDescription{
 		Name:       "job1",
@@ -643,12 +1023,14 @@ func TestServerClientJobNew(t *testing.T) {
 		Command:    "/foo/foo_it.sh",
 	}
 
+	stdClientErrorTests(t, mux, ClientJobNewPath, job0)
+
 	resp := fuq.NewJobResponse{}
 	roundTrip{
 		T:      t,
 		Msg:    &job0,
 		Dst:    &resp,
-		Target: "/client/job/new",
+		Target: ClientJobNewPath,
 	}.TestClientHandler(s.HandleClientJobNew)
 	id := resp.JobId
 
@@ -883,6 +1265,489 @@ func TestServerClientJobList(t *testing.T) {
 	}
 }
 
+func TestServerClientJobState(t *testing.T) {
+	s := newTestingServer()
+
+	mux := SetupRoutes(s)
+
+	jobs := []fuq.JobDescription{
+		{
+			Name:       "job1",
+			NumTasks:   16,
+			WorkingDir: "/foo/bar",
+			LoggingDir: "/foo/bar/logs",
+			Command:    "/foo/foo_it.sh",
+		},
+		{
+			Name:       "job2",
+			NumTasks:   27,
+			WorkingDir: "/foo/baz",
+			LoggingDir: "/foo/baz/logs",
+			Command:    "/foo/baz_it.sh",
+		},
+	}
+
+	for i, j := range jobs {
+		id := addJob(t, s.Foreman, j)
+		jobs[i].JobId = id
+		jobs[i].Status = fuq.Waiting
+	}
+
+	origJobs := make([]fuq.JobDescription, len(jobs))
+	copy(origJobs, jobs)
+
+	// First, fetch some pending tasks to start the first job
+	// running
+	queue := s.JobQueuer.(*simpleQueuer)
+	tasks, err := queue.FetchPendingTasks(8)
+	if err != nil {
+		t.Fatalf("error fetching tasks: %v", err)
+	}
+
+	_ = tasks
+
+	jobs[0].Status = fuq.Running
+	currJobs, err := AllJobs(queue)
+	if err != nil {
+		t.Fatalf("error fetching jobs: %v", err)
+	}
+
+	if !reflect.DeepEqual(jobs, currJobs) {
+		t.Fatalf("expected all jobs to be '%#v', but found '%#v'",
+			jobs, currJobs)
+	}
+
+	var env ClientRequestEnvelope
+
+	// Check error state: bad password
+	env = ClientRequestEnvelope{
+		Auth: fuq.Client{Password: invalidPass, Client: "testing"},
+		Msg: &fuq.ClientStateChangeReq{
+			JobIds: []fuq.JobId{jobs[0].JobId},
+			Action: "hold",
+		},
+	}
+
+	resp := roundTrip{
+		T:      t,
+		Msg:    env,
+		Dst:    nil,
+		Target: "/" + ClientJobStatePath,
+	}.ExpectCode(mux.ServeHTTP, http.StatusForbidden)
+	resp.Body.Close()
+
+	// Check error state: bad json (envelope)
+	resp = roundTrip{
+		T:      t,
+		Msg:    "foo bar baz",
+		Dst:    nil,
+		Target: "/" + ClientJobStatePath,
+	}.ExpectCode(mux.ServeHTTP, http.StatusBadRequest)
+	resp.Body.Close()
+
+	// Check error state: bad json (message)
+	env = ClientRequestEnvelope{
+		Auth: fuq.Client{Password: testingPass, Client: "testing"},
+		Msg:  []string{"foo", "bar", "baz"},
+	}
+
+	resp = roundTrip{
+		T:      t,
+		Msg:    env,
+		Dst:    nil,
+		Target: "/" + ClientJobStatePath,
+	}.ExpectCode(mux.ServeHTTP, http.StatusBadRequest)
+	resp.Body.Close()
+
+	// Check error state: invalid job id
+	invalidId := jobs[1].JobId + 1
+	if invalidId == jobs[0].JobId {
+		invalidId++
+	}
+	env = ClientRequestEnvelope{
+		Auth: fuq.Client{Password: testingPass, Client: "testing"},
+		Msg: fuq.ClientStateChangeReq{
+			JobIds: []fuq.JobId{invalidId},
+			Action: "hold",
+		},
+	}
+
+	resp = roundTrip{
+		T:      t,
+		Msg:    env,
+		Dst:    nil,
+		Target: "/" + ClientJobStatePath,
+	}.ExpectCode(mux.ServeHTTP, http.StatusBadRequest)
+	resp.Body.Close()
+
+	// Check error state: invalid action
+	env = ClientRequestEnvelope{
+		Auth: fuq.Client{Password: testingPass, Client: "testing"},
+		Msg: fuq.ClientStateChangeReq{
+			JobIds: []fuq.JobId{jobs[0].JobId},
+			Action: "foobar",
+		},
+	}
+
+	resp = roundTrip{
+		T:      t,
+		Msg:    env,
+		Dst:    nil,
+		Target: "/" + ClientJobStatePath,
+	}.ExpectCode(mux.ServeHTTP, http.StatusBadRequest)
+	resp.Body.Close()
+
+	// Check error state: empty jobid list
+	env = ClientRequestEnvelope{
+		Auth: fuq.Client{Password: testingPass, Client: "testing"},
+		Msg: fuq.ClientStateChangeReq{
+			JobIds: []fuq.JobId{},
+			Action: "foobar",
+		},
+	}
+
+	resp = roundTrip{
+		T:      t,
+		Msg:    env,
+		Dst:    nil,
+		Target: "/" + ClientJobStatePath,
+	}.ExpectCode(mux.ServeHTTP, http.StatusBadRequest)
+	resp.Body.Close()
+
+	// Now test success states
+
+	// : hold first job
+	env = ClientRequestEnvelope{
+		Auth: fuq.Client{Password: testingPass, Client: "testing"},
+		Msg: fuq.ClientStateChangeReq{
+			JobIds: []fuq.JobId{jobs[0].JobId},
+			Action: "hold",
+		},
+	}
+
+	repl := []fuq.JobStateChangeResponse{}
+	roundTrip{
+		T:      t,
+		Msg:    env,
+		Dst:    &repl,
+		Target: "/" + ClientJobStatePath,
+	}.ExpectOK(mux.ServeHTTP)
+	t.Logf("response is %v", repl)
+
+	expectedRepl := []fuq.JobStateChangeResponse{
+		{jobs[0].JobId, fuq.Running, fuq.Paused},
+	}
+
+	if !reflect.DeepEqual(repl, expectedRepl) {
+		t.Fatalf("expected response '%v' but found '%v'",
+			expectedRepl, repl)
+	}
+
+	jobs[0].Status = fuq.Paused
+	currJobs, err = AllJobs(queue)
+	if err != nil {
+		t.Fatalf("error fetching jobs: %v", err)
+	}
+
+	if !reflect.DeepEqual(jobs, currJobs) {
+		t.Fatalf("expected all jobs to be '%#v', but found '%#v'",
+			jobs, currJobs)
+	}
+
+	// Cancel second job
+	env.Msg = fuq.ClientStateChangeReq{
+		JobIds: []fuq.JobId{jobs[1].JobId},
+		Action: "cancel",
+	}
+	repl = []fuq.JobStateChangeResponse{}
+
+	roundTrip{
+		T:      t,
+		Msg:    env,
+		Dst:    &repl,
+		Target: "/" + ClientJobStatePath,
+	}.ExpectOK(mux.ServeHTTP)
+	t.Logf("response is %v", repl)
+
+	expectedRepl = []fuq.JobStateChangeResponse{
+		{jobs[1].JobId, fuq.Waiting, fuq.Cancelled},
+	}
+
+	if !reflect.DeepEqual(repl, expectedRepl) {
+		t.Fatalf("expected response '%v' but found '%v'",
+			expectedRepl, repl)
+	}
+
+	jobs = []fuq.JobDescription{jobs[0]}
+	currJobs, err = AllJobs(queue)
+	if err != nil {
+		t.Fatalf("error fetching jobs: %v", err)
+	}
+
+	if !reflect.DeepEqual(jobs, currJobs) {
+		t.Fatalf("expected all jobs to be '%#v', but found '%#v'",
+			jobs, currJobs)
+	}
+
+	cancelledJob := origJobs[1]
+	cancelledJob.Status = fuq.Cancelled
+	checkCancelled, err := queue.FetchJobId(cancelledJob.JobId)
+	if err != nil {
+		t.Fatalf("error fetching cancelled job by id: %v", err)
+	}
+
+	if cancelledJob != checkCancelled {
+		t.Fatalf("expected job '%v', but found '%v'",
+			cancelledJob, checkCancelled)
+	}
+
+	// Resume first job
+	env.Msg = fuq.ClientStateChangeReq{
+		JobIds: []fuq.JobId{jobs[0].JobId},
+		Action: "release",
+	}
+	repl = []fuq.JobStateChangeResponse{}
+
+	roundTrip{
+		T:      t,
+		Msg:    env,
+		Dst:    &repl,
+		Target: "/" + ClientJobStatePath,
+	}.ExpectOK(mux.ServeHTTP)
+	t.Logf("response is %v", repl)
+
+	expectedRepl = []fuq.JobStateChangeResponse{
+		{jobs[0].JobId, fuq.Paused, fuq.Waiting},
+	}
+
+	if !reflect.DeepEqual(repl, expectedRepl) {
+		t.Fatalf("expected response '%v' but found '%v'",
+			expectedRepl, repl)
+	}
+
+	jobs[0].Status = fuq.Waiting
+	currJobs, err = AllJobs(queue)
+	if err != nil {
+		t.Fatalf("error fetching jobs: %v", err)
+	}
+
+	if !reflect.DeepEqual(jobs, currJobs) {
+		t.Fatalf("expected all jobs to be '%#v', but found '%#v'",
+			jobs, currJobs)
+	}
+}
+
+func TestServerClientNodeList(t *testing.T) {
+	s := newTestingServer()
+	mux := SetupRoutes(s)
+
+	var env ClientRequestEnvelope
+
+	// Check error state: bad password
+	env = ClientRequestEnvelope{
+		Auth: fuq.Client{Password: invalidPass, Client: "testing"},
+		Msg:  fuq.ClientNodeListReq{},
+	}
+
+	resp := roundTrip{
+		T:      t,
+		Msg:    env,
+		Dst:    nil,
+		Target: "/" + ClientNodeListPath,
+	}.ExpectCode(mux.ServeHTTP, http.StatusForbidden)
+	resp.Body.Close()
+
+	// Check error state: bad json (envelope)
+	resp = roundTrip{
+		T:      t,
+		Msg:    "foo bar baz",
+		Dst:    nil,
+		Target: "/" + ClientNodeListPath,
+	}.ExpectCode(mux.ServeHTTP, http.StatusBadRequest)
+	resp.Body.Close()
+
+	// Check error state: bad json (message)
+	env = ClientRequestEnvelope{
+		Auth: fuq.Client{Password: testingPass, Client: "testing"},
+		Msg:  []string{"foo", "bar", "baz"},
+	}
+
+	resp = roundTrip{
+		T:      t,
+		Msg:    env,
+		Dst:    nil,
+		Target: "/" + ClientNodeListPath,
+	}.ExpectCode(mux.ServeHTTP, http.StatusBadRequest)
+	resp.Body.Close()
+
+	// Now test success states
+
+	// No nodes, only connected nodes (cookies=false)
+	env = ClientRequestEnvelope{
+		Auth: fuq.Client{Password: testingPass, Client: "testing"},
+		Msg:  fuq.ClientNodeListReq{CookieList: false},
+	}
+
+	repl := []fuq.NodeInfo{}
+	roundTrip{
+		T:      t,
+		Msg:    env,
+		Dst:    &repl,
+		Target: "/" + ClientNodeListPath,
+	}.ExpectOK(mux.ServeHTTP)
+	t.Logf("response is %v", repl)
+
+	if len(repl) != 0 {
+		t.Fatalf("expected zero nodes, but found %d: %v",
+			len(repl), repl)
+	}
+
+	// No nodes, all registered nodes (cookies=true)
+	env = ClientRequestEnvelope{
+		Auth: fuq.Client{Password: testingPass, Client: "testing"},
+		Msg:  fuq.ClientNodeListReq{CookieList: true},
+	}
+
+	repl = []fuq.NodeInfo{}
+	roundTrip{
+		T:      t,
+		Msg:    env,
+		Dst:    &repl,
+		Target: "/" + ClientNodeListPath,
+	}.ExpectOK(mux.ServeHTTP)
+	t.Logf("response is %v", repl)
+
+	if len(repl) != 0 {
+		t.Fatalf("expected zero nodes, but found %d: %v",
+			len(repl), repl)
+	}
+
+	// Register two nodes, request nodes connected (zero) and
+	// registered nodes (two)
+
+	ni1, _, _ := serverAuthNode(t, s, "voltron")
+	ni2, _, _ := serverAuthNode(t, s, "robocop")
+	expectedRepl := []fuq.NodeInfo{ni1, ni2}
+
+	env = ClientRequestEnvelope{
+		Auth: fuq.Client{Password: testingPass, Client: "testing"},
+		Msg:  fuq.ClientNodeListReq{CookieList: false},
+	}
+
+	repl = []fuq.NodeInfo{}
+	roundTrip{
+		T:      t,
+		Msg:    env,
+		Dst:    &repl,
+		Target: "/" + ClientNodeListPath,
+	}.ExpectOK(mux.ServeHTTP)
+	t.Logf("response is %v", repl)
+
+	if len(repl) != 0 {
+		t.Fatalf("expected zero nodes, but found %d: %v",
+			len(repl), repl)
+	}
+
+	env = ClientRequestEnvelope{
+		Auth: fuq.Client{Password: testingPass, Client: "testing"},
+		Msg:  fuq.ClientNodeListReq{CookieList: true},
+	}
+
+	repl = []fuq.NodeInfo{}
+	roundTrip{
+		T:      t,
+		Msg:    env,
+		Dst:    &repl,
+		Target: "/" + ClientNodeListPath,
+	}.ExpectOK(mux.ServeHTTP)
+	t.Logf("response is %v", repl)
+
+	if len(repl) != 2 {
+		t.Fatalf("expected two nodes, but found %d: %v",
+			len(repl), repl)
+	}
+
+	// One node connected (fake connection), two registered.
+	// Only one node should be listed.
+	ni := makeNodeInfo()
+	s.Foreman.connections.AddConn(&persistentConn{
+		NodeInfo: ni,
+	})
+
+	env = ClientRequestEnvelope{
+		Auth: fuq.Client{Password: testingPass, Client: "testing"},
+		Msg:  fuq.ClientNodeListReq{CookieList: false},
+	}
+
+	repl = []fuq.NodeInfo{}
+	roundTrip{
+		T:      t,
+		Msg:    env,
+		Dst:    &repl,
+		Target: "/" + ClientNodeListPath,
+	}.ExpectOK(mux.ServeHTTP)
+	t.Logf("response is %v", repl)
+
+	if len(repl) != 1 {
+		t.Fatalf("expected one node, but found %d: %v",
+			len(repl), repl)
+	}
+
+	expectedRepl = []fuq.NodeInfo{ni}
+	if !reflect.DeepEqual(repl, expectedRepl) {
+		t.Fatalf("expected reply '%v' but found '%v'",
+			repl, expectedRepl)
+	}
+
+	/*
+		expectedRepl := []fuq.JobStateChangeResponse{
+			{jobs[0].JobId, fuq.Running, fuq.Paused},
+		}
+
+		if !reflect.DeepEqual(repl, expectedRepl) {
+			t.Fatalf("expected response '%v' but found '%v'",
+				expectedRepl, repl)
+		}
+	*/
+}
+
+func TestServerClientNodeShutdown(t *testing.T) {
+	s := newTestingServer()
+	mux := SetupRoutes(s)
+
+	stdClientErrorTests(t, mux, ClientNodeShutdownPath, fuq.ClientNodeShutdownReq{})
+
+	// Now test success states
+
+	var env ClientRequestEnvelope
+
+	nodes := []string{"voltron-1", "robocop-1"}
+	env = ClientRequestEnvelope{
+		Auth: fuq.Client{Password: testingPass, Client: "testing"},
+		Msg:  fuq.ClientNodeShutdownReq{UniqNames: nodes},
+	}
+
+	for _, n := range nodes {
+		if s.IsNodeShutdown(n) {
+			t.Errorf("expected IsShutdown(\"%s\") to be false, but it is true", n)
+		}
+	}
+
+	roundTrip{
+		T:      t,
+		Msg:    env,
+		Dst:    nil,
+		Target: ClientNodeShutdownPath,
+	}.ExpectOK(mux.ServeHTTP)
+	// t.Logf("response is %v", repl)
+
+	for _, n := range nodes {
+		if !s.IsNodeShutdown(n) {
+			t.Errorf("expected IsShutdown(\"%s\") to be true, but it is false", n)
+		}
+	}
+}
+
 func newTestClient(t *testing.T, s *Server) (*websocket.Messenger, testClient) {
 	ni, _, resp := serverAuth(t, s)
 	_ = ni
@@ -892,16 +1757,28 @@ func newTestClient(t *testing.T, s *Server) (*websocket.Messenger, testClient) {
 		t.Fatalf("error allocating cookie jar: %v", err)
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(s.HandleNodePersistent))
+	mux := SetupRoutes(s)
+	server := httptest.NewServer(mux)
 	defer server.Close()
 
 	theURL, err := url.Parse(server.URL)
+	theURL.Path = "/node/persistent"
 	if err != nil {
 		t.Fatalf("error parsing server URL: %s", server.URL)
 	}
 	jar.SetCookies(theURL, resp.Cookies())
 
-	messenger, _, err := websocket.Dial(server.URL, jar)
+	messenger, resp, err := websocket.Dial(theURL.String(), jar)
+	if err != nil {
+		t.Logf("error dialing websocket at %s: %v", theURL.String(), err)
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("error reading response body: %v", err)
+		}
+		t.Logf("response is: %s", body)
+		t.Fatalf("error dialing websocket: %v", err)
+	}
+
 	messenger.Timeout = 60 * time.Second
 
 	client := proto.NewConn(proto.Opts{

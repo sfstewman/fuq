@@ -114,6 +114,15 @@ type ClientStateChangeReq struct {
 	Action string
 }
 
+type ClientNodeListReq struct {
+	CookieList bool `json:"cookie_list"`
+	JobList    bool `json:"job_list"`
+}
+
+type ClientNodeShutdownReq struct {
+	UniqNames []string `json:"uniq_names"`
+}
+
 type JobStatus int
 
 const (

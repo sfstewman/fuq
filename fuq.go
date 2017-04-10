@@ -57,8 +57,6 @@ type Hello struct {
 	NodeInfo
 }
 
-type Cookie string
-
 type Registration struct {
 	Name   string
 	Cookie Cookie

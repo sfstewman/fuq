@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/sfstewman/fuq"
+	"github.com/sfstewman/fuq/srv"
 	"os"
 	"strconv"
 )
@@ -53,7 +54,7 @@ func changeStateCmd(cfg fuq.Config, args []string) error {
 	}
 
 	ret := []fuq.JobStateChangeResponse{}
-	if err := callEndpoint(cfg, "client/job/state", &req, &ret); err != nil {
+	if err := callEndpoint(cfg, srv.ClientJobStatePath, &req, &ret); err != nil {
 		return fmt.Errorf("Error encountered changing state of jobs %v: %v",
 			req.JobIds, err)
 	}
