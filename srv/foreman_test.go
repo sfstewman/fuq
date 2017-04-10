@@ -133,6 +133,10 @@ func (q *simpleQueuer) FetchJobTaskStatus(jobId fuq.JobId) (fuq.JobTaskStatus, e
 }
 
 func (q *simpleQueuer) FetchPendingTasks(nproc int) ([]fuq.Task, error) {
+	if nproc < 1 {
+		return nil, fmt.Errorf("cannot fetch %d tasks", nproc)
+	}
+
 	tasks := make([]fuq.Task, 0, nproc)
 
 	q.mu.Lock()

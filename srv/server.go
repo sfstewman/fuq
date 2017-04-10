@@ -18,11 +18,14 @@ const (
 	ServerCookieAge = 14 * 24 * time.Hour
 	MaxCookieLength = 128
 
-	HelloPath              = "hello"
-	NodeReauthPath         = "node/reauth"
-	NodePersistentPath     = "node/persistent"
-	JobRequestPath         = "job/request"
-	JobUpdatePath          = "job/update"
+	HelloPath = "hello"
+
+	NodeReauthPath     = "node/reauth"
+	NodePersistentPath = "node/persistent"
+
+	JobRequestPath = "job/request"
+	JobUpdatePath  = "job/update"
+
 	ClientNodeListPath     = "client/nodes/list"
 	ClientNodeShutdownPath = "client/nodes/shutdown"
 	ClientJobListPath      = "client/job/list"
@@ -324,7 +327,8 @@ func (s *Server) HandleNodeJobUpdate(resp http.ResponseWriter, req *http.Request
 	}
 
 	if jobUpdate.NewJob == nil {
-		fuq.OK(resp, req)
+		emptyTasks := []fuq.Task{}
+		RespondWithJSON(resp, emptyTasks)
 		return
 	}
 
@@ -409,6 +413,8 @@ func (s *Server) HandleNodeJobRequest(resp http.ResponseWriter, req *http.Reques
 		fuq.BadRequest(resp, req)
 		return
 	}
+
+	log.Printf("%s: job request %#v", req.RemoteAddr, jobReq)
 
 	if jobReq.NumProc > ni.NumProc {
 		jobReq.NumProc = ni.NumProc

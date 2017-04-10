@@ -10,6 +10,7 @@ import (
 	"github.com/sfstewman/fuq/proto"
 	"github.com/sfstewman/fuq/websocket"
 	"io/ioutil"
+	"log"
 	"math/rand"
 	"net/http"
 	"net/http/cookiejar"
@@ -87,7 +88,9 @@ func (jar *simpleCookieJar) uniquifyName(ni fuq.NodeInfo) string {
 	i := 1
 	for {
 		uniqName := fmt.Sprintf("%s-%d", ni.Node, i)
-		if _, ok := jar.nodes[n]; !ok {
+		log.Printf("node %s, trying unique name %s", ni.Node, uniqName)
+		if _, ok := jar.nodes[uniqName]; !ok {
+			log.Print("success")
 			return uniqName
 		}
 

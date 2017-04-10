@@ -29,11 +29,8 @@ func (ep *Endpoint) RefreshCookie(oldCookie fuq.Cookie) error {
 func (w *Endpoint) RequestAction(ctx context.Context, nproc int) (node.WorkerAction, error) {
 	cookie := w.Cookie()
 
-	req := NodeRequestEnvelope{
-		Cookie: cookie,
-		Msg: fuq.JobRequest{
-			NumProc: nproc,
-		},
+	req := fuq.JobRequest{
+		NumProc: nproc,
 	}
 
 	ret := []fuq.Task{}
@@ -48,7 +45,6 @@ retry:
 			err = w.RefreshCookie(cookie)
 			if err == nil {
 				w.Log("Refreshed cookie")
-				req.Cookie = w.Cookie()
 				goto retry
 			}
 		}
@@ -83,14 +79,10 @@ func (w *Endpoint) UpdateAndRequestAction(ctx context.Context, status fuq.JobSta
 		status.NewJob = &fuq.JobRequest{NumProc: nproc}
 	}
 
-	req := NodeRequestEnvelope{
-		Cookie: w.Cookie(),
-		Msg:    &status,
-	}
-
+	req := status
 	ret := []fuq.Task{}
 
-	if _, err := w.CallEndpoint("job/status", &req, &ret); err != nil {
+	if _, err := w.CallEndpoint("job/update", &req, &ret); err != nil {
 		return nil, err
 	}
 
