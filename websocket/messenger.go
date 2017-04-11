@@ -199,15 +199,15 @@ func (ws *Messenger) Close() error {
 	return ws.CloseWithMessage(websocket.CloseNormalClosure, "closing")
 }
 
-func (ws *Messenger) sendPing(ctx context.Context, count uint) error {
+func (ws *Messenger) sendPing(ctx context.Context, tag string, count uint) error {
 	ws.closed.Lock()
 	defer ws.closed.Unlock()
 
-	msg := []byte(fmt.Sprintf("PING_%d", count))
+	msg := []byte(fmt.Sprintf("PING:%s:%d", tag, count))
 	return ws.C.WriteMessage(websocket.PingMessage, msg)
 }
 
-func (ws *Messenger) Heartbeat(ctx context.Context) error {
+func (ws *Messenger) Heartbeat(ctx context.Context, tag string) error {
 	var pingCount uint
 
 	timeout := ws.Timeout
@@ -235,7 +235,7 @@ func (ws *Messenger) Heartbeat(ctx context.Context) error {
 			return nil
 		case <-ticker.C:
 			pingCount++
-			if err := ws.sendPing(ctx, pingCount); err != nil {
+			if err := ws.sendPing(ctx, tag, pingCount); err != nil {
 				return err
 			}
 			log.Printf("PING %d", pingCount)

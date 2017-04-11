@@ -146,7 +146,7 @@ func startDispatcher(wcfg *srv.NodeConfig, nproc int, config fuq.Config) error {
 	defer messenger.CloseNow()
 
 	// XXX - handle any errors you encounter here!
-	go messenger.Heartbeat(ctx)
+	go messenger.Heartbeat(ctx, "w2f_"+origUniqName)
 
 	logPath := filepath.Join(logDir,
 		fmt.Sprintf("%s.log", uniqName))

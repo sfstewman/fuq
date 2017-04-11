@@ -467,7 +467,7 @@ func (s *Server) HandleNodePersistent(resp http.ResponseWriter, req *http.Reques
 	messenger.Timeout = 5 * time.Minute
 
 	// XXX - deal with errors
-	go messenger.Heartbeat(loopCtx)
+	go messenger.Heartbeat(loopCtx, "f2w_"+ni.UniqName)
 	pc := newPersistentConn(s.Foreman, ni, messenger)
 
 	s.Foreman.connections.AddConn(pc)
