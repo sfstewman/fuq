@@ -459,7 +459,7 @@ func (s *Server) HandleNodePersistent(resp http.ResponseWriter, req *http.Reques
 	}
 
 	// spin up a persistent connection...
-	log.Print("%s: spinning up consistent connection", req.RemoteAddr)
+	log.Printf("%s: spinning up consistent connection", req.RemoteAddr)
 	ctx := req.Context()
 	loopCtx, cancel := context.WithCancel(ctx)
 	defer cancel()

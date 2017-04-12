@@ -1966,6 +1966,13 @@ func TestServerClientNodeShutdown(t *testing.T) {
 	}
 }
 
+func signalOnFinish(h http.Handler, signal chan<- struct{}) http.Handler {
+	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+		defer close(signal)
+		h.ServeHTTP(resp, req)
+	})
+}
+
 func newTestClient(t *testing.T, s *Server) (*websocket.Messenger, testClient) {
 	ni, _, resp := serverAuth(t, s)
 	_ = ni
@@ -1975,8 +1982,11 @@ func newTestClient(t *testing.T, s *Server) (*websocket.Messenger, testClient) {
 		t.Fatalf("error allocating cookie jar: %v", err)
 	}
 
+	serverFinished := make(chan struct{})
+
 	mux := SetupRoutes(s)
-	server := httptest.NewServer(mux)
+	server := httptest.NewServer(
+		signalOnFinish(mux, serverFinished))
 	defer server.Close()
 
 	theURL, err := url.Parse(server.URL)
@@ -2004,7 +2014,12 @@ func newTestClient(t *testing.T, s *Server) (*websocket.Messenger, testClient) {
 		Worker:    true,
 	})
 
-	return messenger, testClient{Conn: client, NodeInfo: ni}
+	return messenger, testClient{
+		Conn:           client,
+		NodeInfo:       ni,
+		Messenger:      messenger,
+		ServerFinished: serverFinished,
+	}
 }
 
 func TestServerNodeOnHello(t *testing.T) {
@@ -2194,6 +2209,193 @@ func TestServerNodeOnUpdate(t *testing.T) {
 		t.Log("task status may not be updated")
 		t.Fatalf("expected taskStatus='%v', but found '%v'",
 			expectedStatus, taskStatus)
+	}
+}
+
+func pconnHello(t *testing.T, ctx context.Context, client testClient, nproc int) {
+	msg, err := client.SendHello(ctx, proto.HelloData{
+		NumProcs: nproc,
+		Running:  nil,
+	})
+
+	if err != nil {
+		t.Fatalf("error in HELLO: %v", err)
+	}
+
+	if msg.Type != proto.MTypeOK {
+		t.Fatalf("expected OK reply, but received %v", msg)
+	}
+
+	np, nr := msg.AsOkay()
+	if int(np) != nproc || int(nr) != 0 {
+		t.Fatalf("expected OK(%d|0), but received OK(%d|%d)", nproc, np, nr)
+	}
+}
+
+type simpleJobHandler struct {
+	sync.Mutex
+
+	t      *testing.T
+	nproc  int
+	nrun   int
+	taskCh chan []fuq.Task
+}
+
+func newSimpleJobHandler(t *testing.T, np int) *simpleJobHandler {
+	return &simpleJobHandler{
+		t:      t,
+		nproc:  np,
+		taskCh: make(chan []fuq.Task),
+	}
+}
+
+func (sjh *simpleJobHandler) onJob(msg proto.Message) proto.Message {
+	taskPtr := msg.Data.(*[]fuq.Task)
+	tasks := *taskPtr
+
+	sjh.Lock()
+	defer sjh.Unlock()
+
+	sjh.t.Logf("%d tasks: %v", len(tasks), tasks)
+
+	sjh.nproc -= len(tasks)
+	sjh.nrun += len(tasks)
+
+	// XXX - check that nproc, nrun are in valid range for uint16
+	if sjh.nproc < 0 {
+		panic("invalid number of tasks")
+	}
+
+	repl := proto.OkayMessage(uint16(sjh.nproc), uint16(sjh.nrun), msg.Seq)
+	sjh.taskCh <- tasks
+	return repl
+}
+
+func (sjh *simpleJobHandler) Stats() (nproc, nrun int) {
+	sjh.Lock()
+	defer sjh.Unlock()
+
+	return sjh.nproc, sjh.nrun
+}
+
+func (sjh *simpleJobHandler) TaskCh() <-chan []fuq.Task {
+	sjh.Lock()
+	defer sjh.Unlock()
+
+	return sjh.taskCh
+}
+
+func TestServerPConnClosedWhileJobsRunning(t *testing.T) {
+	s := newTestingServer()
+
+	wsConn, client := newTestClient(t, s)
+	defer wsConn.Close()
+	// defer client.Close()
+
+	queue := s.JobQueuer.(*simpleQueuer)
+	id, err := queue.AddJob(fuq.JobDescription{
+		Name:       "job1",
+		NumTasks:   8,
+		WorkingDir: "/foo/bar",
+		LoggingDir: "/foo/bar/logs",
+		Command:    "/foo/foo_it.sh",
+	})
+
+	_, _ = id, err
+
+	sjh := newSimpleJobHandler(t, 7)
+	taskCh := sjh.TaskCh()
+	client.OnMessageFunc(proto.MTypeJob, sjh.onJob)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go client.ConversationLoop(ctx)
+
+	// XXX
+	pconnHello(t, ctx, client, 7)
+
+	// make sure we're in the connection set...
+	var ourPc *persistentConn
+	err = s.connections.EachConn(func(pc *persistentConn) error {
+		if pc.NodeInfo.UniqName == client.NodeInfo.UniqName {
+			ourPc = pc
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("error looking for persistent connection: %v", err)
+	}
+
+	if ourPc == nil {
+		t.Fatal("could not find persistent connection")
+	}
+
+	// The foreman should dispatch nproc tasks
+	tasks := <-taskCh
+	if len(tasks) != 7 {
+		t.Fatalf("expected 7 tasks to be queued")
+	}
+
+	np, nr := sjh.Stats()
+	if np != 0 && nr != 7 {
+		t.Fatalf("expected nproc=%d and nrun=%d, but found nproc=%d and nrun=%d",
+			0, 7, np, nr)
+	}
+
+	// abruptly close connection!
+	client.Messenger.Close()
+
+	// wait for request to finish...
+	<-client.ServerFinished
+
+	if s.connections.HasConn(ourPc) {
+		t.Errorf("after close, should not have connection set")
+	}
+}
+
+func TestServerPConnClosedWhileWaitingForJobs(t *testing.T) {
+	s := newTestingServer()
+
+	wsConn, client := newTestClient(t, s)
+	defer wsConn.Close()
+
+	sjh := newSimpleJobHandler(t, 7)
+	client.OnMessageFunc(proto.MTypeJob, sjh.onJob)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go client.ConversationLoop(ctx)
+
+	// XXX
+	pconnHello(t, ctx, client, 7)
+
+	// make sure we're in the connection set...
+	var ourPc *persistentConn
+	err := s.connections.EachConn(func(pc *persistentConn) error {
+		if pc.NodeInfo.UniqName == client.NodeInfo.UniqName {
+			ourPc = pc
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		t.Fatalf("error looking for persistent connection: %v", err)
+	}
+
+	if ourPc == nil {
+		t.Fatal("could not find persistent connection")
+	}
+
+	// abruptly close connection!
+	client.Messenger.Close()
+
+	// wait for request to finish...
+	<-client.ServerFinished
+
+	if s.connections.HasConn(ourPc) {
+		t.Errorf("after close, should not have connection set")
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/sfstewman/fuq"
 	"github.com/sfstewman/fuq/proto"
+	"github.com/sfstewman/fuq/websocket"
 	"reflect"
 	"sort"
 	"sync"
@@ -247,7 +248,9 @@ func addJob(t *testing.T, f *Foreman, job fuq.JobDescription) fuq.JobId {
 
 type testClient struct {
 	*proto.Conn
-	NodeInfo fuq.NodeInfo
+	Messenger      *websocket.Messenger
+	NodeInfo       fuq.NodeInfo
+	ServerFinished chan struct{}
 }
 
 func TestForemanReadyChanWaitsUntilWakeup(t *testing.T) {

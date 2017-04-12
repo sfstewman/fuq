@@ -150,12 +150,14 @@ func (mc *Conn) incomingLoop(ctx context.Context, msgCh chan<- Message, errorCh 
 		}
 
 		msg, err := mc.messenger.Receive()
-		log.Printf("INCOMING message: %v", msg)
+		log.Printf("proto.Conn(%p): INCOMING message: %v", mc, msg)
 
 		// even if there's an error, we need to update the sequence number
 		mc.updateSeq(msg.Seq)
 
 		if err == ErrClosed {
+			log.Printf("proto.Conn(%p): Messenger(%p) received a CLOSE",
+				mc, mc.messenger)
 			return
 		}
 
@@ -272,6 +274,8 @@ recv_loop:
 
 		case msg, ok := <-incomingCh:
 			if !ok {
+				log.Printf("proto.Conn(%p): main loop incoming channel has CLOSED",
+					mc)
 				break recv_loop
 			}
 
@@ -341,6 +345,7 @@ recv_loop:
 		}
 	}
 
+	log.Printf("proto.Conn(%p): main loop is FINISHING", mc)
 	return nil
 }
 

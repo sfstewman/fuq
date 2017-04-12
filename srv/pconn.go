@@ -133,7 +133,7 @@ func (pc *persistentConn) numProcAvail() (int, chan struct{}) {
 	return 0, ready
 }
 
-func (pc *persistentConn) waitOnWorkers(ctx context.Context) (int, error) {
+func (pc *persistentConn) waitOnWorkers(ctx context.Context, errCh <-chan error) (int, error) {
 	f := pc.F
 	ni := pc.NodeInfo
 	for {
@@ -147,6 +147,14 @@ func (pc *persistentConn) waitOnWorkers(ctx context.Context) (int, error) {
 		select {
 		case <-ready:
 			continue
+
+		case err := <-errCh:
+			log.Printf("pconn(%p): received error %v from errCh", pc, err)
+			if err != nil {
+				return 0, err
+			}
+			return 0, proto.ErrClosed
+
 		case <-wakeup:
 			if f.IsNodeShutdown(ni.UniqName) {
 				return 0, nil
@@ -228,12 +236,23 @@ func (pc *persistentConn) waitForStop(ctx context.Context) error {
 }
 
 func (pc *persistentConn) Loop(ctx context.Context) error {
-	go pc.C.ConversationLoop(ctx)
+	errCh := make(chan error)
+
+	go func() {
+		defer close(errCh)
+
+		err := pc.C.ConversationLoop(ctx)
+		if err != nil {
+			errCh <- err
+		}
+	}()
 
 	startSignal := pc.helloSignal
 	select {
 	case <-startSignal:
 		/* nop */
+	case err := <-errCh:
+		return err
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -242,7 +261,12 @@ func (pc *persistentConn) Loop(ctx context.Context) error {
 	uniqName := pc.NodeInfo.UniqName
 
 	for {
-		nproc, err := pc.waitOnWorkers(ctx)
+		nproc, err := pc.waitOnWorkers(ctx, errCh)
+		if err == proto.ErrClosed {
+			fmt.Printf("pconn(%p): stopping the loop", pc)
+			return nil
+		}
+
 		if err != nil {
 			return err
 		}
@@ -276,6 +300,8 @@ func (pc *persistentConn) Loop(ctx context.Context) error {
 			select {
 			case <-ctx.Done():
 				return nil
+			case err := <-errCh:
+				return err
 			case <-jobsAvail:
 				log.Printf("pc(%p): jobsAvail signal", pc)
 				continue

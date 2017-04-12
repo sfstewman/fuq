@@ -89,6 +89,14 @@ func (cm *connectionSet) AddConn(pc *persistentConn) {
 	cm.Set[pc] = struct{}{}
 }
 
+func (cm *connectionSet) HasConn(pc *persistentConn) bool {
+	cm.Lock()
+	defer cm.Unlock()
+
+	_, ok := cm.Set[pc]
+	return ok
+}
+
 func (cm *connectionSet) DelConn(pc *persistentConn) {
 	cm.Lock()
 	defer cm.Unlock()

@@ -270,7 +270,9 @@ func (ws *Messenger) Receive() (proto.Message, error) {
 
 	mt, r, err := ws.C.NextReader()
 	if err != nil {
+		log.Printf("websocket.Messenger(%p): error = %v", ws, err)
 		if _, ok := err.(*websocket.CloseError); ok {
+			log.Printf("websocket.Messenger(%p): closed", ws)
 			return proto.Message{}, proto.ErrClosed
 		}
 		return proto.Message{}, err
