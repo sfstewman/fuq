@@ -16,12 +16,16 @@ type WSPair struct {
 	Listener net.Listener
 	Server   http.Server
 
+	UConn net.Conn
+
 	connCh     chan *websocket.Conn
 	socketPath string
 }
 
 func (wsp *WSPair) Close() {
 	// wsc.Server.Shutdown()
+	defer wsp.UConn.Close()
+
 	wsp.Listener.Close()
 	os.Remove(wsp.TmpDir)
 }
@@ -96,6 +100,7 @@ func (wsp *WSPair) Dial() error {
 	}
 	wsp.CConn = cconn
 	wsp.SConn = <-wsp.connCh
+	wsp.UConn = conn
 
 	return nil
 }
