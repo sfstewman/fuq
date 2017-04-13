@@ -261,7 +261,15 @@ func (ws *Messenger) Send(msg proto.Message) error {
 	}
 	defer wr.Close()
 
-	return msg.Send(wr)
+	if err := msg.Send(wr); err != nil {
+		if err == websocket.ErrCloseSent {
+			return proto.ErrClosed
+		}
+
+		return err
+	}
+
+	return nil
 }
 
 func (ws *Messenger) Receive() (proto.Message, error) {

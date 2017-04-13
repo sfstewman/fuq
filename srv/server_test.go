@@ -1081,6 +1081,7 @@ func TestServerNodeJobRequestOnShutdown(t *testing.T) {
 	<-wait
 
 	s.ShutdownNodes([]string{ni.UniqName})
+	s.WakeupListeners()
 
 	// wait for goroutine to finish
 	<-wait
@@ -2022,6 +2023,19 @@ func newTestClient(t *testing.T, s *Server) (*websocket.Messenger, testClient) {
 	}
 }
 
+func (tc *testClient) runConversationLoop(ctx context.Context) error {
+	err := tc.ConversationLoop(ctx)
+	if err == nil {
+		return nil
+	}
+
+	if err == proto.ErrClosed {
+		return nil
+	}
+
+	return err
+}
+
 func TestServerNodeOnHello(t *testing.T) {
 	s := newTestingServer()
 
@@ -2061,7 +2075,7 @@ func TestServerNodeOnHello(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	fuqtest.GoPanicOnError(ctx, client.ConversationLoop)
+	fuqtest.GoPanicOnError(ctx, client.runConversationLoop)
 
 	msg, err := client.SendHello(ctx, proto.HelloData{
 		NumProcs: 7,
@@ -2245,7 +2259,7 @@ func newSimpleJobHandler(t *testing.T, np int) *simpleJobHandler {
 	return &simpleJobHandler{
 		t:      t,
 		nproc:  np,
-		taskCh: make(chan []fuq.Task),
+		taskCh: make(chan []fuq.Task, 1),
 	}
 }
 
@@ -2561,7 +2575,7 @@ func TestPConnStop(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	fuqtest.GoPanicOnError(ctx, client.ConversationLoop)
+	fuqtest.GoPanicOnError(ctx, client.runConversationLoop)
 
 	msg, err := client.SendHello(ctx, proto.HelloData{
 		NumProcs: 8,

@@ -236,10 +236,14 @@ func (pc *persistentConn) waitForStop(ctx context.Context) error {
 }
 
 func (pc *persistentConn) Loop(ctx context.Context) error {
-	errCh := make(chan error)
+	errCh := make(chan error, 1)
+
+	loopCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	go func() {
 		defer close(errCh)
+		defer cancel()
 
 		err := pc.C.ConversationLoop(ctx)
 		if err != nil {
@@ -260,8 +264,9 @@ func (pc *persistentConn) Loop(ctx context.Context) error {
 	f := pc.F
 	uniqName := pc.NodeInfo.UniqName
 
+loop:
 	for {
-		nproc, err := pc.waitOnWorkers(ctx, errCh)
+		nproc, err := pc.waitOnWorkers(loopCtx, errCh)
 		if err == proto.ErrClosed {
 			fmt.Printf("pconn(%p): stopping the loop", pc)
 			return nil
@@ -272,11 +277,11 @@ func (pc *persistentConn) Loop(ctx context.Context) error {
 		}
 
 		if f.IsNodeShutdown(uniqName) {
-			if err := pc.sendStop(ctx); err != nil {
+			if err := pc.sendStop(loopCtx); err != nil {
 				log.Printf("error sending STOP: %v", err)
 				return err
 			}
-			return pc.waitForStop(ctx)
+			return pc.waitForStop(loopCtx)
 		}
 
 		if nproc == 0 {
@@ -298,8 +303,8 @@ func (pc *persistentConn) Loop(ctx context.Context) error {
 			f.jobsSignal.mu.Unlock()
 
 			select {
-			case <-ctx.Done():
-				return nil
+			case <-loopCtx.Done():
+				break loop
 			case err := <-errCh:
 				return err
 			case <-jobsAvail:
@@ -310,7 +315,7 @@ func (pc *persistentConn) Loop(ctx context.Context) error {
 
 		f.jobsSignal.mu.Unlock()
 
-		if err := pc.sendJobs(ctx, tasks); err != nil {
+		if err := pc.sendJobs(loopCtx, tasks); err != nil {
 			log.Printf("error sending tasks: %v", err)
 			return err
 		}
@@ -319,4 +324,15 @@ func (pc *persistentConn) Loop(ctx context.Context) error {
 		log.Printf("%s: queued %d tasks",
 			pc.NodeInfo.UniqName, len(tasks))
 	}
+
+	// check that we didn't miss an error
+	select {
+	case err := <-errCh:
+		return err
+	default:
+		if err := loopCtx.Err(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
