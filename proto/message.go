@@ -19,6 +19,20 @@ type Message struct {
 	Type MType
 	Seq  uint32
 	Data interface{}
+
+	after func()
+}
+
+// Sets the after function on a message.  If set, the after function is
+// called by the connection after the message is sent.
+func (m *Message) After(fn func()) {
+	m.after = fn
+}
+
+func (m Message) DoAfter() {
+	if m.after != nil {
+		m.after()
+	}
 }
 
 func (m Message) GoString() string {

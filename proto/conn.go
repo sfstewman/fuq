@@ -81,7 +81,9 @@ func (mc *Conn) updateSeq(new uint32) {
 }
 
 func (mc *Conn) xmit(m Message) error {
-	return mc.messenger.Send(m)
+	err := mc.messenger.Send(m)
+	m.DoAfter()
+	return err
 }
 
 func (mc *Conn) xmitWithSeq(m Message) (seq uint32, err error) {
@@ -245,8 +247,6 @@ func (mc *Conn) ConversationLoop(ctx context.Context) (err error) {
 		}
 	}()
 
-	// log.Printf("%p --> CL: START", mc)
-
 recv_loop:
 	for {
 		err = nil
@@ -320,7 +320,7 @@ recv_loop:
 			continue recv_loop
 
 		dispatch:
-			log.Printf("proto.Conn(%p): dispatching message", mc)
+			log.Printf("proto.Conn(%p): dispatching message %v", mc, msg)
 
 			if err = mc.dispatchMessage(msg); err != nil {
 				log.Printf("ERROR dispatching message [%v]: %v", msg, err)
@@ -350,9 +350,17 @@ recv_loop:
 }
 
 func (mc *Conn) sendMessage(ctx context.Context, mt MType, data interface{}) (Message, error) {
-	m := Message{Type: mt, Data: data}
+	return mc.SendMessage(ctx, Message{Type: mt, Data: data})
+}
+
+func (mc *Conn) SendMessage(ctx context.Context, m Message) (Message, error) {
 	replyCh := make(chan reply)
-	mc.outgoingCh <- outgoingMessage{M: m, R: replyCh}
+
+	select {
+	case mc.outgoingCh <- outgoingMessage{M: m, R: replyCh}:
+	case <-ctx.Done():
+		return Message{}, ctx.Err()
+	}
 
 	select {
 	case repl := <-replyCh:

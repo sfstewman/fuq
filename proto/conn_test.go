@@ -15,7 +15,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-	// "log"
 )
 
 type connTestRigger interface {
@@ -238,6 +237,7 @@ func runTestsWithRig(mk testRigMaker, t *testing.T) {
 	t.Run("SecondSendBlocksUntilReply", testWithRig(mk, SecondSendBlocksUntilReplyTest))
 	t.Run("HoldMessageUntilReply", testWithRig(mk, HoldMessageUntilReplyTest))
 	t.Run("SequencesAreIncreasing", testWithRig(mk, SequencesAreIncreasingTest))
+	t.Run("MessageAfterFunc", testWithRig(mk, MessageAfterFuncTest))
 }
 
 func TestNetConn(t *testing.T) {
@@ -531,101 +531,152 @@ func SendHelloTest(tc connTestRigger, t *testing.T) {
 }
 
 func SecondSendBlocksUntilReplyTest(tc connTestRigger, t *testing.T) {
+	// This test is meant to test the following situation:
+	//   two goroutines in Endpoint1 each send a message in the order
+	//   message1,message2
+	//
+	// Endpoint1 should wait to receive a reply to message1 before
+	// sending message2
+	//
+
 	var (
-		order     = make(chan int, 4)
-		recvSync  = make(chan struct{})
-		sendWait1 = make(chan struct{})
-		sendWait2 = make(chan struct{})
-		replWait  = make(chan struct{})
+		waitCh      = make(chan struct{})
+		received    = make(chan int)
+		replied     = make(chan int)
+		sentSignal1 = make(chan struct{})
+		sentSignal2 = make(chan struct{})
 	)
 
 	mcw, mcf := tc.MCW(), tc.MCF()
 
+	// on JOB message:
+	//   1. signal that the message has been received by sending the
+	//      task number to the received channel
+	//   2. reply with OK(Task-5|5)
 	mcw.OnMessageFunc(proto.MTypeJob, func(msg proto.Message) proto.Message {
-		// log.Printf("RECEIVED: JOB")
 		data := msg.Data.(*[]fuq.Task)
-		close(recvSync) // signal that first message has been received
+		tasks := *data
+		received <- tasks[0].Task
+		np := uint16(tasks[0].Task - 5)
+		return proto.OkayMessage(np, 5, msg.Seq)
+	})
 
-		<-replWait
-		order <- (*data)[0].Task
-		return proto.OkayMessage(17, 5, msg.Seq)
+	// register OK handler to detect when we've received the reply
+	// on a reply (must be OK), sends the nproc field to the replied
+	// channel
+	mcf.OnMessageFunc(proto.MTypeOK, func(msg proto.Message) proto.Message {
+		np, nr := msg.AsOkay()
+		t.Logf("received reply OK(%d|%d)", np, nr)
+		replied <- int(np)
+		return proto.Message{} // reply is ignore for OK and Error
 	})
 
 	ctx := tc.Context()
 	fuqtest.GoPanicOnError(ctx, mcw.ConversationLoop)
 	fuqtest.GoPanicOnError(ctx, mcf.ConversationLoop)
 
-	// first send
+	// first send:
+	//   1. wait for signal to start (receive on waitCh)
+	//   2. send JOB, wait for AFTER signal on sentSignal1
+	//   3. wait for a reply
+	//   4. close(sentSignal1) to signal reply received
 	go func() {
-		<-sendWait1
-		_, err := mcf.SendJob(ctx, []fuq.Task{
-			fuq.Task{
-				Task:           23,
-				JobDescription: fuq.JobDescription{JobId: fuq.JobId(7)},
-			},
+		// wait for signal to start
+		<-waitCh
+
+		desc := fuq.JobDescription{JobId: fuq.JobId(7)}
+		tasks := []fuq.Task{{Task: 23, JobDescription: desc}}
+
+		m := proto.Message{Type: proto.MTypeJob, Data: tasks}
+		m.After(func() {
+			// signal that message was sent
+			sentSignal1 <- struct{}{}
 		})
+
+		_, err := mcf.SendMessage(ctx, m)
 		if err != nil {
 			panic(err)
 		}
-		order <- 1
-		<-sendWait1
+
+		// signal that reply was received
+		close(sentSignal1)
 	}()
 
 	// make sure goroutine of first send starts
-	sendWait1 <- struct{}{}
+	waitCh <- struct{}{}
 
-	// make sure first message has been received
-	<-recvSync
-	recvSync = make(chan struct{})
+	// ensure that first message has been sent
+	<-sentSignal1
 
-	// second send
+	// NB: we don't receive on the 'received' channel
+	// until the second send is ready to go
+
+	// second send:
+	//   1. wait for signal to start (receive on waitCh)
+	//   2. send JOB, wait for AFTER signal on sentSignal2
+	//   3. wait for a reply
+	//   4. close(sentSignal2) to signal reply received
 	go func() {
-		<-sendWait2
-		_, err := mcf.SendJob(ctx, []fuq.Task{
-			fuq.Task{
-				Task:           24,
-				JobDescription: fuq.JobDescription{JobId: fuq.JobId(7)},
-			},
+		<-waitCh // wait for signal to start
+		desc := fuq.JobDescription{JobId: fuq.JobId(7)}
+		tasks := []fuq.Task{{Task: 24, JobDescription: desc}}
+
+		m := proto.Message{Type: proto.MTypeJob, Data: tasks}
+		m.After(func() {
+			// signal that message was sent
+			sentSignal2 <- struct{}{}
 		})
-		if err != nil {
+
+		if _, err := mcf.SendMessage(ctx, m); err != nil {
 			panic(err)
 		}
-		order <- 2
+
+		// signal that reply was received
+		close(sentSignal2)
 	}()
 
 	// make sure goroutine of second send starts
-	sendWait2 <- struct{}{}
+	waitCh <- struct{}{}
 
-	// quick test that second job has not been received
+	// allow the reply to proceed
+	tnum := <-received
+	if tnum != 23 {
+		t.Errorf("JOB receive should be 23, but was %d", tnum)
+	}
+
+	// now we need to check the ordering: we should receive the
+	// signal of the reply before the signal that message 2 has been
+	// sent.
 	select {
-	case <-recvSync:
-		t.Fatal("second job received before reply to first job has been sent")
-	default:
+	case r := <-replied:
+		if r != 18 {
+			t.Errorf("expected replied channel message to be 18, but found %d",
+				r)
+		}
+	case <-sentSignal2:
+		t.Fatal("sent second message before reply to first")
 	}
 
-	// signal for first reply (and all subsequent replies) to finish
-	close(replWait)
-	sendWait1 <- struct{}{}
+	// ensure that the reply has been returned
+	<-sentSignal1
 
-	// make sure that second message has been received
-	<-recvSync
+	// expect the second message to be sent
+	<-sentSignal2
 
-	// now check the order
-	recv1 := <-order
-	repl1 := <-order
-
-	recv2 := <-order
-	repl2 := <-order
-
-	if repl1 != 1 || repl2 != 2 {
-		t.Errorf("error in reply order: expected 1,2 but found %d,%d",
-			repl1, repl2)
+	// check that it's been received
+	tnum = <-received
+	if tnum != 24 {
+		t.Errorf("JOB receive should be 24, but was %d", tnum)
 	}
 
-	if recv1 != 23 || recv2 != 24 {
-		t.Errorf("error in receive order: expected tasks 23,24 but found %d,%d",
-			recv1, recv2)
+	r := <-replied
+	if r != 19 {
+		t.Errorf("expected replied channel message to be 19, but found %d",
+			r)
 	}
+
+	// ensure that the reply has been returned
+	<-sentSignal2
 }
 
 func HoldMessageUntilReplyTest(tc connTestRigger, t *testing.T) {
@@ -847,4 +898,125 @@ func SequencesAreIncreasingTest(tc connTestRigger, t *testing.T) {
 				i-1, i, seq0, seq1)
 		}
 	}
+}
+
+func MessageAfterFuncTest(tc connTestRigger, t *testing.T) {
+	// Tests that message After functions are run in the correct
+	// order.
+	//
+	// To test this, we:
+	//
+	//   1. send a message (M) with an After function.
+	//   2. receive the message and send a reply (R) with an after
+	//      function
+	//
+	//   The observable events are:
+	//
+	//	MA: M After function called after send
+	//	MR: M received
+	//	RA: R After function called
+	//	RR: R received (M send function returns)
+	//
+	// We receive on an unbuffered channel to detect these events.
+	//
+	// The possible orderings:
+	//
+	//	1a. MA or MR
+	//	1b. MR or MA (whatever isn't first)
+	//
+	//	2a. RA or RR
+	//	2b. RR or RA (whatever isn't first)
+	//
+	// The orderings for the pairs 1a,b and 2a,b are not
+	// well-determined, but if the After function is called after a
+	// message is sent (and not before), then we can do the
+	// following:
+	//
+	//   1. send message M
+	//   2. block on the message receive (MR) event
+	//   3. block on the message after (MA) event
+	//
+	// If the message After function is called before the message is
+	// sent, this will deadlock.  We use a similar sequence for the
+	// reply.
+	//
+	// We also check the ordering of MR and RR.  RR should occur
+	// strictly after MR.
+	//
+
+	mcf := tc.MCF()
+	mcw := tc.MCW()
+
+	signalMA := make(chan struct{})
+	signalMR := make(chan struct{})
+
+	signalRA := make(chan struct{})
+	signalRR := make(chan struct{})
+
+	mcf.OnMessageFunc(proto.MTypeHello, func(msg proto.Message) proto.Message {
+		t.Logf("signaling HELLO received: %v", msg)
+		// signal start
+		signalMR <- struct{}{}
+
+		m := proto.OkayMessage(17, 11, msg.Seq)
+
+		// signal after message is sent
+		m.After(func() {
+			t.Logf("signaling that reply AFTER func called")
+			signalRA <- struct{}{}
+		})
+
+		t.Logf("set AFTER func on reply %v and returning", m)
+		return m
+	})
+
+	ctx := tc.Context()
+	fuqtest.GoPanicOnError(ctx, mcf.ConversationLoop)
+	fuqtest.GoPanicOnError(ctx, mcw.ConversationLoop)
+
+	go func() {
+		hello := proto.HelloData{NumProcs: 11}
+		msg := proto.Message{Type: proto.MTypeHello, Data: hello}
+		msg.After(func() {
+			t.Logf("signaling that message AFTER func called")
+			signalMA <- struct{}{}
+		})
+
+		_, err := mcw.SendMessage(context.TODO(), msg)
+		if err != nil {
+			panic(err)
+		}
+		signalRR <- struct{}{}
+	}()
+
+	t.Log("waiting for message received and message after events")
+
+	// Test that either RA or MR event happens, and that
+	// the reply-received event doesn't happen.
+	select {
+	case <-signalMR:
+		t.Log("message received event")
+		signalMR = nil
+
+	case <-signalRR:
+		t.Fatal("reply receive event before message received and message after")
+	}
+
+	select {
+	case <-signalMA:
+		t.Log("message after event")
+		signalMA = nil
+	case <-signalRR:
+		t.Fatal("reply receive event before message received and message after")
+		// Note that we can't control the order of the
+		// reply-after event, so we don't block on it.
+	}
+
+	t.Log("waiting for reply received and reply after events")
+
+	<-signalRR
+	t.Log("reply received event")
+
+	<-signalRA
+	t.Log("reply after event")
 }
