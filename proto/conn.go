@@ -240,11 +240,7 @@ func (mc *Conn) ConversationLoop(ctx context.Context) (err error) {
 			err = ErrClosed
 		}
 
-		select {
-		case replyCh <- reply{E: ErrClosed}:
-		default:
-			panic("reply expected, but could not send")
-		}
+		close(replyCh)
 	}()
 
 recv_loop:
@@ -288,9 +284,18 @@ recv_loop:
 			if msg.Seq == waitingSeq {
 				log.Printf("proto.Conn(%p): message is REPLY to %d",
 					mc, waitingSeq)
-				replyCh <- reply{M: msg}
+
+				rch := replyCh
 				replyCh = nil
 				waitingSeq = 0
+
+				select {
+				case rch <- reply{M: msg}:
+					/* nop */
+				case <-done:
+					// XXX - note the lost message?
+					break recv_loop
+				}
 
 				goto dispatch
 			}
@@ -363,8 +368,11 @@ func (mc *Conn) SendMessage(ctx context.Context, m Message) (Message, error) {
 	}
 
 	select {
-	case repl := <-replyCh:
-		// log.Printf("reply: %v", repl)
+	case repl, ok := <-replyCh:
+		if !ok {
+			// closed or canceled before reply
+			return Message{}, ErrClosed
+		}
 		return repl.M, repl.E
 	case <-ctx.Done():
 		return Message{}, ctx.Err()

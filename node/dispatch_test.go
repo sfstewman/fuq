@@ -143,6 +143,10 @@ func (dts *dispatcherTestState) startServer() (*proto.Conn, chan proto.Message, 
 	go func(syncCh, signal chan struct{}) {
 		syncCh <- struct{}{}
 		if err := d.QueueLoop(ctx); err != nil {
+			if err == proto.ErrClosed {
+				return
+			}
+
 			panic(err)
 		}
 		close(signal)

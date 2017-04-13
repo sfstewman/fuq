@@ -254,11 +254,16 @@ func (ws *Messenger) Send(msg proto.Message) error {
 
 	wr, err := ws.C.NextWriter(websocket.BinaryMessage)
 	if err != nil {
+		if err == websocket.ErrCloseSent {
+			return proto.ErrClosed
+		}
+
 		if _, ok := err.(*websocket.CloseError); ok {
 			return proto.ErrClosed
 		}
 		return err
 	}
+
 	defer wr.Close()
 
 	if err := msg.Send(wr); err != nil {
