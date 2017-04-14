@@ -107,13 +107,17 @@ func (pc *persistentConn) onUpdate(msg proto.Message) proto.Message {
 		pc.ready = nil
 	}
 
+	reply := proto.OkayMessage(pc.nproc, pc.nrun, msg.Seq)
+
 	if pc.nproc == 0 && pc.nrun == 0 {
-		close(pc.stopSignal)
+		reply.After(func() {
+			close(pc.stopSignal)
+		})
 	}
 
 	log.Printf("pconn(%p): sending WAKEUP", pc)
 	pc.F.WakeupListeners()
-	return proto.OkayMessage(pc.nproc, pc.nrun, msg.Seq)
+	return reply
 }
 
 func (pc *persistentConn) numProcAvail() (int, chan struct{}) {
