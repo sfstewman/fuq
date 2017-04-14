@@ -3,7 +3,6 @@ package node
 import (
 	"context"
 	"errors"
-	"fmt"
 	"github.com/sfstewman/fuq"
 	"log"
 	"sync"
@@ -81,15 +80,6 @@ func (f RunnerFunc) Run(ctx context.Context, t fuq.Task, w *Worker) (fuq.JobStat
 	return f(ctx, t, w)
 }
 
-func (w *Worker) LogIfError(err error, pfxFmt string, args ...interface{}) {
-	if err == nil {
-		return
-	}
-
-	pfx := fmt.Sprintf(pfxFmt, args...)
-	w.Log("%s: %v", pfx, err)
-}
-
 func (w *Worker) Log(format string, args ...interface{}) {
 	if w.Logger != nil {
 		w.Logger.Printf(format, args...)
@@ -153,6 +143,13 @@ func (w *Worker) CurrentAction() (WorkerAction, context.CancelFunc) {
 	return w.current.action, w.current.cancel
 }
 
+func (w *Worker) WithCurrent(fn func(*Worker, WorkerAction, context.CancelFunc) error) error {
+	w.current.Lock()
+	defer w.current.Unlock()
+
+	return fn(w, w.current.action, w.current.cancel)
+}
+
 func (w *Worker) actOnRequest(ctx context.Context, req WorkerAction) (*fuq.JobStatusUpdate, error) {
 	reqCtx := w.setCurrent(ctx, req)
 	defer w.ClearCurrent()
@@ -189,11 +186,15 @@ func (w *Worker) Loop(ctx context.Context) {
 			return
 		}
 
-		w.LogIfError(err, "error encountered while running job")
-
 		if upd == nil {
 			req = nil
 			continue
+		}
+
+		if err != nil {
+			w.Log("%s: %v", "error encountered while running job", err)
+			upd.Success = false
+			upd.Status = err.Error()
 		}
 
 		req, err = w.Queuer.UpdateAndRequestAction(ctx, *upd, 1)

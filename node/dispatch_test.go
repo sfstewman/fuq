@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -253,7 +254,7 @@ func TestDispatcherStop(t *testing.T) {
 	hdata := hello.Data.(*proto.HelloData)
 	if hdata.NumProcs != 4 {
 		t.Errorf("invalid HELLO: expected NumProcs = %d, found %d",
-			2, hdata.NumProcs)
+			4, hdata.NumProcs)
 	}
 
 	if len(hdata.Running) != 0 {
@@ -273,6 +274,220 @@ func TestDispatcherStop(t *testing.T) {
 	}
 }
 
+// node.Runner that blocks until the context is canceled
+type blockingRunner struct {
+	T        *testing.T
+	nrunning int64
+	started  chan int
+	ended    chan int
+	wg       sync.WaitGroup
+}
+
+func (br *blockingRunner) NumRunning() int {
+	c := atomic.LoadInt64(&br.nrunning)
+	return int(c)
+}
+
+func (br *blockingRunner) Run(ctx context.Context, t fuq.Task, w *Worker) (fuq.JobStatusUpdate, error) {
+	atomic.AddInt64(&br.nrunning, 1)
+	defer atomic.AddInt64(&br.nrunning, -1)
+
+	br.wg.Add(1)
+	defer br.wg.Done()
+
+	// signal that we've started
+	select {
+	case br.started <- t.Task:
+		/* nop */
+		br.T.Logf("Runner for task %d sent STARTED event", t.Task)
+	case <-ctx.Done():
+		br.T.Logf("Runner for task %d received CANCEL event", t.Task)
+		return fuq.JobStatusUpdate{}, ctx.Err()
+	}
+
+	// block until the context is canceled
+	<-ctx.Done()
+
+	// signal that we're ending
+	br.ended <- t.Task
+	br.T.Logf("Runner for %d sent ENDED event", t.Task)
+
+	// return success to ensure that the dispatcher sets Success to
+	// false and the status to the error
+	return fuq.JobStatusUpdate{
+		JobId:   t.JobId,
+		Task:    t.Task,
+		Success: true,
+		Status:  "done",
+	}, ctx.Err()
+}
+
+func TestDispatcherCancel(t *testing.T) {
+	runner := &blockingRunner{
+		T:       t,
+		started: make(chan int),
+		ended:   make(chan int),
+	}
+
+	dts := newDispatcherTestState(2, runner)
+	defer dts.Close()
+
+	ctx := dts.ctx
+	server, msgCh, _ := dts.startServer()
+
+	log.Printf("T %s: runner       = %p", t.Name(), runner)
+	log.Printf("T %s: dispatcher   = %p", t.Name(), dts.dispatcher)
+	log.Printf("T %s: C proto.Conn = %p\n", t.Name(), dts.dispatcher.M)
+	log.Printf("T %s: S proto.Conn = %p\n", t.Name(), server)
+	log.Printf("T %s: messenger    = %p\n", t.Name(), dts.dispatcher.Messenger)
+
+	hello := <-msgCh
+	hdata := hello.Data.(*proto.HelloData)
+	if hdata.NumProcs != 2 {
+		t.Errorf("invalid HELLO: expected NumProcs = %d, found %d",
+			2, hdata.NumProcs)
+	}
+
+	if len(hdata.Running) != 0 {
+		t.Errorf("invalid HELLO: expected #Running = %d, found %d",
+			0, len(hdata.Running))
+	}
+
+	tasks := []fuq.Task{
+		fuq.Task{
+			Task: 3,
+			JobDescription: fuq.JobDescription{
+				JobId:      fuq.JobId(7),
+				Name:       "this_job",
+				NumTasks:   3,
+				WorkingDir: ".",
+				LoggingDir: ".",
+				Command:    "/bin/true", // XXX - make more portable!
+			},
+		},
+		fuq.Task{
+			Task: 9,
+			JobDescription: fuq.JobDescription{
+				JobId:      fuq.JobId(7),
+				Name:       "this_job",
+				NumTasks:   3,
+				WorkingDir: ".",
+				LoggingDir: ".",
+				Command:    "/bin/true", // XXX - make more portable!
+			},
+		},
+	}
+
+	resp, err := server.SendJob(ctx, tasks)
+
+	// make sure both jobs haved started
+	<-runner.started
+	<-runner.started
+
+	if err != nil {
+		t.Fatalf("error sending tasks: %v", err)
+	}
+
+	switch resp.Type {
+	case proto.MTypeOK:
+		/* okay */
+	case proto.MTypeError:
+		errcode, arg0 := resp.AsError()
+		t.Fatalf("error response: code = %d, arg = %d", errcode, arg0)
+	default:
+		t.Fatalf("unknown respone type: %s", resp.Type)
+	}
+
+	if nr := runner.NumRunning(); nr != 2 {
+		t.Fatalf("NumRunning = %d, but expected 2", nr)
+	}
+
+	cancelMesg := []fuq.TaskPair{{7, 3}}
+	resp, err = server.SendCancel(ctx, cancelMesg)
+
+	nc1, nc2 := resp.AsOkay()
+	if nc1 != 1 || nc2 != 0 {
+		t.Errorf("expected OK(1|0) reply, but received OK(%d|%d)", nc1, nc2)
+	}
+
+	taskNum := <-runner.ended
+	if taskNum != 3 {
+		t.Fatalf("expected task 2 to end, but task %d ended", taskNum)
+	}
+
+	// dispatcher should send an UPDATE
+	updMsg := <-msgCh
+	t.Logf("received UPDATE: %v", updMsg)
+	upd := updMsg.Data.(*fuq.JobStatusUpdate)
+	if upd.JobId != 7 || upd.Task != 3 {
+		t.Errorf("update for job %d, task %d, expected update for job 7, task 3",
+			upd.JobId, upd.Task)
+	}
+
+	if upd.Success {
+		t.Error("expected update to indicate failure, but indicated success")
+	}
+
+	if upd.Status == "done" {
+		t.Error("update status should indicate error, but is \"done\"")
+	}
+
+	// send CANCELs that don't match any running jobs
+	resp, err = server.SendCancel(ctx, []fuq.TaskPair{{9, -1}})
+	nc1, nc2 = resp.AsOkay()
+	if nc1 != 0 || nc2 != 0 {
+		t.Errorf("expected OK(0|0) to CANCEL that matches no running jobs, but found OK(%d|%d)",
+			nc1, nc2)
+	}
+
+	resp, err = server.SendCancel(ctx, []fuq.TaskPair{{7, 1}})
+	nc1, nc2 = resp.AsOkay()
+	if nc1 != 0 || nc2 != 0 {
+		t.Errorf("expected OK(0|0) to CANCEL that matches no running jobs, but found OK(%d|%d)",
+			nc1, nc2)
+	}
+
+	resp, err = server.SendCancel(ctx, []fuq.TaskPair{{10, -1}})
+	nc1, nc2 = resp.AsOkay()
+	if nc1 != 0 || nc2 != 0 {
+		t.Errorf("expected OK(0|0) to CANCEL that matches no running jobs, but found OK(%d|%d)",
+			nc1, nc2)
+	}
+
+	// cancel all tasks of job 7
+	resp, err = server.SendCancel(ctx, []fuq.TaskPair{{7, -1}})
+	nc1, nc2 = resp.AsOkay()
+	if nc1 != 1 || nc2 != 0 {
+		t.Errorf("expected OK(1|0) to CANCEL(7,-1), but found OK(%d|%d)",
+			nc1, nc2)
+	}
+
+	taskNum = <-runner.ended
+	if taskNum != 9 {
+		t.Fatalf("expected task 1 to end, but task %d ended", taskNum)
+	}
+
+	// dispatcher should send an UPDATE
+	updMsg = <-msgCh
+	t.Logf("received UPDATE: %v", updMsg)
+	upd = updMsg.Data.(*fuq.JobStatusUpdate)
+	if upd.JobId != 7 || upd.Task != 9 {
+		t.Errorf("update for job %d, task %d, expected update for job 7, task 9",
+			upd.JobId, upd.Task)
+	}
+
+	if upd.Success {
+		t.Error("expected update to indicate failure, but indicated success")
+	}
+
+	if upd.Status == "done" {
+		t.Error("update status should indicate error, but is \"done\"")
+	}
+
+	// wait
+	runner.wg.Wait()
+}
+
 func TestDispatcherStopImmed(t *testing.T) {
 	runner := &okayRunner{}
 
@@ -286,7 +501,7 @@ func TestDispatcherStopImmed(t *testing.T) {
 	hdata := hello.Data.(*proto.HelloData)
 	if hdata.NumProcs != 4 {
 		t.Errorf("invalid HELLO: expected NumProcs = %d, found %d",
-			2, hdata.NumProcs)
+			4, hdata.NumProcs)
 	}
 
 	if len(hdata.Running) != 0 {

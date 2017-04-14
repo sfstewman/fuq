@@ -91,6 +91,7 @@ func NewDispatch(cfg DispatchConfig) *Dispatch {
 
 	d.M.OnMessageFunc(proto.MTypeJob, d.onJob)
 	d.M.OnMessageFunc(proto.MTypeStop, d.onStop)
+	d.M.OnMessageFunc(proto.MTypeCancel, d.onCancel)
 	// TODO: handle RESET ?
 
 	return &d
@@ -328,6 +329,82 @@ func (d *Dispatch) onJob(msg proto.Message) proto.Message {
 	}
 
 	return proto.OkayMessage(uint16(nproc), uint16(nrun), msg.Seq)
+}
+
+func (d *Dispatch) cancelTasks(pairs []fuq.TaskPair) int {
+	// XXX - this prevents d.workers from changing, but doesn't
+	// directly prevent jobs from being enqueued or updates from
+	// being sent back.  I'm not sure if we need to do this, though.
+	// Two reasons:
+	//
+	// 1. This function is (currently) meant to be called from the
+	//    onCancel function, which is called from within the
+	//    goroutine that runs the event dispatch loop.
+	//
+	//    This means that new tasks cannot be enqueued before
+	//    this function returns, because JOB messages are blocked
+	//    until the event dispatch loop can proceed.
+	//
+	// 2. Each worker is processed once, and their current action is
+	//    locked during the processing.  This prevents a worker from
+	//    updating at the same time that it's being processed.
+	//
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	ncanceled := 0
+
+	// This is a double linear scan, which isn't particularly
+	// efficient, but it should be fine for a small number of
+	// workers and cancel requests.  If either becomes large and
+	// cancel requests become common, we should revisit how we do
+	// this.
+	//
+	// Iterate over the workers first so we process each worker in
+	// turn.
+	for _, w := range d.workers {
+		err := w.WithCurrent(func(w *Worker, act WorkerAction, cancel context.CancelFunc) error {
+			for _, pair := range pairs {
+				if act == nil {
+					continue
+				}
+
+				runAct, ok := act.(RunAction)
+				if !ok {
+					continue
+				}
+
+				if runAct.JobId != pair.JobId {
+					continue
+				}
+
+				if pair.Task < 0 || runAct.Task == pair.Task {
+					log.Printf("node.Dispatch(%p): canceling job %d, task %d on worker %p",
+						d, pair.JobId, pair.Task, w)
+					cancel()
+					ncanceled++
+				}
+			}
+
+			return nil
+		})
+		if err != nil {
+			panic(fmt.Sprintf("unexpected error while canceling tasks: %v", err))
+		}
+	}
+
+	return ncanceled
+}
+
+func (d *Dispatch) onCancel(msg proto.Message) proto.Message {
+	pairsPtr := msg.Data.(*[]fuq.TaskPair)
+	pairs := *pairsPtr
+	log.Printf("node.Dispatch(%p): cancel request %#v", d, pairs)
+
+	ncanceled := d.cancelTasks(pairs)
+
+	// OK message is (ncanceled|0)
+	return proto.OkayMessage(uint16(ncanceled), 0, msg.Seq)
 }
 
 func findTask(tasks []fuq.Task, job fuq.JobId, taskNum int) int {
