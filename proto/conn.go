@@ -6,6 +6,7 @@ import (
 	"github.com/sfstewman/fuq"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -36,6 +37,7 @@ type NopFlusher struct{}
 func (NopFlusher) Flush() {}
 
 type Conn struct {
+	mu         sync.Mutex
 	handlers   [256]MessageHandler
 	messenger  Messenger
 	seq        Sequencer
@@ -97,6 +99,8 @@ func (mc *Conn) Close() {
 }
 
 func (mc *Conn) OnMessage(mt MType, h MessageHandler) {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
 	mc.handlers[uint8(mt)] = h
 }
 
@@ -179,12 +183,20 @@ func (mc *Conn) incomingLoop(ctx context.Context, msgCh chan<- Message, errorCh 
 	}
 }
 
-func (mc *Conn) dispatchMessage(m Message) error {
-	t := m.Type
+func (mc *Conn) handlerFor(t MType) MessageHandler {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
 	h := mc.handlers[uint8(t)]
 	if h == nil {
 		h = mc.handlers[0]
 	}
+	return h
+}
+
+func (mc *Conn) dispatchMessage(m Message) error {
+	t := m.Type
+	h := mc.handlerFor(t)
 
 	if t != MTypeOK && h == nil {
 		return fmt.Errorf("no handler for message %v", m)
