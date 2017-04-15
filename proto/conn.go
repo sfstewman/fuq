@@ -392,15 +392,15 @@ func (mc *Conn) SendMessage(ctx context.Context, m Message) (Message, error) {
 }
 
 func (mc *Conn) SendJob(ctx context.Context, job []fuq.Task) (Message, error) {
-	return mc.sendMessage(ctx, MTypeJob, &job)
+	return mc.sendMessage(ctx, MTypeJob, job)
 }
 
 func (mc *Conn) SendUpdate(ctx context.Context, update fuq.JobStatusUpdate) (Message, error) {
-	return mc.sendMessage(ctx, MTypeUpdate, &update)
+	return mc.sendMessage(ctx, MTypeUpdate, update)
 }
 
 func (mc *Conn) SendCancel(ctx context.Context, cancel []fuq.TaskPair) (Message, error) {
-	return mc.sendMessage(ctx, MTypeCancel, &cancel)
+	return mc.sendMessage(ctx, MTypeCancel, cancel)
 }
 
 func (mc *Conn) SendStop(ctx context.Context, nproc uint32) (Message, error) {
@@ -413,5 +413,5 @@ func (mc *Conn) SendStopImmed(ctx context.Context) error {
 }
 
 func (mc *Conn) SendHello(ctx context.Context, hello HelloData) (Message, error) {
-	return mc.sendMessage(ctx, MTypeHello, &hello)
+	return mc.sendMessage(ctx, MTypeHello, hello)
 }

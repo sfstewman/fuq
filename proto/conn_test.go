@@ -289,11 +289,10 @@ func OnMessageTest(tc connTestRigger, t *testing.T) {
 		t.Errorf("wrong job type, expected JOB, found %d", received.Type)
 	}
 
-	recvJobPtr, ok := received.Data.(*[]fuq.Task)
+	recvJob, ok := received.Data.([]fuq.Task)
 	if !ok {
 		t.Fatalf("wrong data type, expected []fuq.Task, found %T", received.Data)
 	}
-	recvJob := *recvJobPtr
 
 	if len(recvJob) != 1 {
 		t.Fatalf("expected one job item, found %d", len(recvJob))
@@ -353,13 +352,13 @@ func SendJobTest(tc connTestRigger, t *testing.T) {
 		t.Fatalf("expected job message")
 	}
 
-	trecvPtr, ok := received.Data.(*[]fuq.Task)
+	trecv, ok := received.Data.([]fuq.Task)
 	if !ok {
 		t.Fatalf("expected JOB data, but found: %#v", received.Data)
 	}
 
-	if !reflect.DeepEqual(tsend, *trecvPtr) {
-		t.Errorf("Jobs sent %v disagree with jobs received %v", tsend, *trecvPtr)
+	if !reflect.DeepEqual(tsend, trecv) {
+		t.Errorf("Jobs sent %v disagree with jobs received %v", tsend, trecv)
 	}
 
 	checkOK(t, repl, 17, 5)
@@ -399,13 +398,13 @@ func SendUpdateTest(tc connTestRigger, t *testing.T) {
 		t.Fatalf("expected job update message")
 	}
 
-	urecvPtr, ok := received.Data.(*fuq.JobStatusUpdate)
+	urecv, ok := received.Data.(fuq.JobStatusUpdate)
 	if !ok {
 		t.Fatalf("expected job update data, but found: %#v", received.Data)
 	}
 
-	if !reflect.DeepEqual(usend, *urecvPtr) {
-		t.Errorf("UPDATE received, but update = %v, expected %v", *urecvPtr, usend)
+	if !reflect.DeepEqual(usend, urecv) {
+		t.Errorf("UPDATE received, but update = %v, expected %v", urecv, usend)
 	}
 
 	checkOK(t, resp, 12, 3)
@@ -442,12 +441,12 @@ func SendCancelTest(tc connTestRigger, t *testing.T) {
 		t.Fatalf("expected job cancel message")
 	}
 
-	urecvPtr, ok := received.Data.(*[]fuq.TaskPair)
+	urecv, ok := received.Data.([]fuq.TaskPair)
 	if !ok {
 		t.Fatalf("expected job cancel data, but found: %#v", received.Data)
 	}
 
-	if !reflect.DeepEqual(usend, *urecvPtr) {
+	if !reflect.DeepEqual(usend, urecv) {
 		t.Errorf("UPDATE received, but update = %v, expected %v", *urecvPtr, usend)
 	}
 
@@ -518,12 +517,12 @@ func SendHelloTest(tc connTestRigger, t *testing.T) {
 		t.Fatalf("expected stop message")
 	}
 
-	hrecvPtr, ok := received.Data.(*proto.HelloData)
+	hrecv, ok := received.Data.(proto.HelloData)
 	if !ok {
 		t.Fatalf("expected hello data, but found: %#v", received.Data)
 	}
 
-	if !reflect.DeepEqual(hello, *hrecvPtr) {
+	if !reflect.DeepEqual(hello, hrecv) {
 		t.Errorf("HELLO received, but update = %v, expected %v", *hrecvPtr, hello)
 	}
 
@@ -554,8 +553,7 @@ func SecondSendBlocksUntilReplyTest(tc connTestRigger, t *testing.T) {
 	//      task number to the received channel
 	//   2. reply with OK(Task-5|5)
 	mcw.OnMessageFunc(proto.MTypeJob, func(msg proto.Message) proto.Message {
-		data := msg.Data.(*[]fuq.Task)
-		tasks := *data
+		tasks := msg.Data.([]fuq.Task)
 		received <- tasks[0].Task
 		np := uint16(tasks[0].Task - 5)
 		return proto.OkayMessage(np, 5, msg.Seq)

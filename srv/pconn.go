@@ -53,7 +53,7 @@ func (pc *persistentConn) onHello(msg proto.Message) proto.Message {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 
-	hello := msg.Data.(*proto.HelloData)
+	hello := msg.Data.(proto.HelloData)
 
 	// XXX - should record running tasks
 
@@ -76,11 +76,11 @@ func (pc *persistentConn) onUpdate(msg proto.Message) proto.Message {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 
-	updPtr := msg.Data.(*fuq.JobStatusUpdate)
+	upd := msg.Data.(fuq.JobStatusUpdate)
 
-	if err := pc.F.UpdateTaskStatus(*updPtr); err != nil {
+	if err := pc.F.UpdateTaskStatus(upd); err != nil {
 		log.Printf("error updating task status (update=%v): %v",
-			*updPtr, err)
+			upd, err)
 	}
 
 	// check for overflow/underflow

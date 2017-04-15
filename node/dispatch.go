@@ -316,8 +316,7 @@ func (d *Dispatch) onStop(msg proto.Message) proto.Message {
 }
 
 func (d *Dispatch) onJob(msg proto.Message) proto.Message {
-	taskPtr := msg.Data.(*[]fuq.Task)
-	tasks := *taskPtr
+	tasks := msg.Data.([]fuq.Task)
 	log.Printf("received %d tasks: %v", len(tasks), tasks)
 
 	nproc, nrun, err := d.Enqueue(tasks)
@@ -397,8 +396,7 @@ func (d *Dispatch) cancelTasks(pairs []fuq.TaskPair) int {
 }
 
 func (d *Dispatch) onCancel(msg proto.Message) proto.Message {
-	pairsPtr := msg.Data.(*[]fuq.TaskPair)
-	pairs := *pairsPtr
+	pairs := msg.Data.([]fuq.TaskPair)
 	log.Printf("node.Dispatch(%p): cancel request %#v", d, pairs)
 
 	ncanceled := d.cancelTasks(pairs)

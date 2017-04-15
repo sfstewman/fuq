@@ -2058,8 +2058,7 @@ func TestServerNodeOnHello(t *testing.T) {
 
 	var nproc, nrun uint16 = 7, 0
 	client.OnMessageFunc(proto.MTypeJob, func(msg proto.Message) proto.Message {
-		taskPtr := msg.Data.(*[]fuq.Task)
-		tasks := *taskPtr
+		tasks := msg.Data.([]fuq.Task)
 		t.Logf("%d tasks: %v", len(tasks), tasks)
 		nproc -= uint16(len(tasks))
 		nrun += uint16(len(tasks))
@@ -2129,8 +2128,7 @@ func TestServerNodeOnUpdate(t *testing.T) {
 
 	var nproc, nrun uint16 = 7, 0
 	client.OnMessageFunc(proto.MTypeJob, func(msg proto.Message) proto.Message {
-		taskPtr := msg.Data.(*[]fuq.Task)
-		tasks := *taskPtr
+		tasks := msg.Data.([]fuq.Task)
 		t.Logf("%d tasks: %v", len(tasks), tasks)
 		nproc -= uint16(len(tasks))
 		nrun += uint16(len(tasks))
@@ -2264,8 +2262,7 @@ func newSimpleJobHandler(t *testing.T, np int) *simpleJobHandler {
 }
 
 func (sjh *simpleJobHandler) onJob(msg proto.Message) proto.Message {
-	taskPtr := msg.Data.(*[]fuq.Task)
-	tasks := *taskPtr
+	tasks := msg.Data.([]fuq.Task)
 
 	sjh.Lock()
 	defer sjh.Unlock()
@@ -2425,8 +2422,7 @@ func TestPConnNodeNewJobsQueued(t *testing.T) {
 
 	var nproc, nrun uint16 = 8, 0
 	client.OnMessageFunc(proto.MTypeJob, func(msg proto.Message) proto.Message {
-		taskPtr := msg.Data.(*[]fuq.Task)
-		tasks := *taskPtr
+		tasks := msg.Data.([]fuq.Task)
 
 		t.Logf("onJob received %d tasks: %v", len(tasks), tasks)
 		nproc -= uint16(len(tasks))
@@ -2537,8 +2533,7 @@ func TestPConnStop(t *testing.T) {
 
 	var nproc, nrun, nstop uint16 = 8, 0, 0
 	client.OnMessageFunc(proto.MTypeJob, func(msg proto.Message) proto.Message {
-		taskPtr := msg.Data.(*[]fuq.Task)
-		tasks := *taskPtr
+		tasks := msg.Data.([]fuq.Task)
 
 		if len(tasks) > int(nproc) {
 			panic("invalid number of tasks")

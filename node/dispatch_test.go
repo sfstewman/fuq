@@ -114,7 +114,7 @@ func (dts *dispatcherTestState) startServer() (*proto.Conn, chan proto.Message, 
 	syncCh := make(chan struct{})
 	server.OnMessageFunc(proto.MTypeHello, func(m proto.Message) proto.Message {
 		msgCh <- m
-		data := m.Data.(*proto.HelloData)
+		data := m.Data.(proto.HelloData)
 		np := uint16(data.NumProcs)
 		nr := uint16(len(data.Running))
 		return proto.OkayMessage(np, nr, m.Seq)
@@ -167,7 +167,7 @@ func TestDispatcherJobs(t *testing.T) {
 	server, msgCh, _ := dts.startServer()
 
 	hello := <-msgCh
-	hdata := hello.Data.(*proto.HelloData)
+	hdata := hello.Data.(proto.HelloData)
 	if hdata.NumProcs != 2 {
 		t.Errorf("invalid HELLO: expected NumProcs = %d, found %d",
 			2, hdata.NumProcs)
@@ -251,7 +251,7 @@ func TestDispatcherStop(t *testing.T) {
 	server, msgCh, _ := dts.startServer()
 
 	hello := <-msgCh
-	hdata := hello.Data.(*proto.HelloData)
+	hdata := hello.Data.(proto.HelloData)
 	if hdata.NumProcs != 4 {
 		t.Errorf("invalid HELLO: expected NumProcs = %d, found %d",
 			4, hdata.NumProcs)
@@ -342,7 +342,7 @@ func TestDispatcherCancel(t *testing.T) {
 	log.Printf("T %s: messenger    = %p\n", t.Name(), dts.dispatcher.Messenger)
 
 	hello := <-msgCh
-	hdata := hello.Data.(*proto.HelloData)
+	hdata := hello.Data.(proto.HelloData)
 	if hdata.NumProcs != 2 {
 		t.Errorf("invalid HELLO: expected NumProcs = %d, found %d",
 			2, hdata.NumProcs)
@@ -418,7 +418,7 @@ func TestDispatcherCancel(t *testing.T) {
 	// dispatcher should send an UPDATE
 	updMsg := <-msgCh
 	t.Logf("received UPDATE: %v", updMsg)
-	upd := updMsg.Data.(*fuq.JobStatusUpdate)
+	upd := updMsg.Data.(fuq.JobStatusUpdate)
 	if upd.JobId != 7 || upd.Task != 3 {
 		t.Errorf("update for job %d, task %d, expected update for job 7, task 3",
 			upd.JobId, upd.Task)
@@ -470,7 +470,7 @@ func TestDispatcherCancel(t *testing.T) {
 	// dispatcher should send an UPDATE
 	updMsg = <-msgCh
 	t.Logf("received UPDATE: %v", updMsg)
-	upd = updMsg.Data.(*fuq.JobStatusUpdate)
+	upd = updMsg.Data.(fuq.JobStatusUpdate)
 	if upd.JobId != 7 || upd.Task != 9 {
 		t.Errorf("update for job %d, task %d, expected update for job 7, task 9",
 			upd.JobId, upd.Task)
@@ -498,7 +498,7 @@ func TestDispatcherStopImmed(t *testing.T) {
 	server, msgCh, _ := dts.startServer()
 
 	hello := <-msgCh
-	hdata := hello.Data.(*proto.HelloData)
+	hdata := hello.Data.(proto.HelloData)
 	if hdata.NumProcs != 4 {
 		t.Errorf("invalid HELLO: expected NumProcs = %d, found %d",
 			4, hdata.NumProcs)

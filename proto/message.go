@@ -220,6 +220,44 @@ func ReceiveMessage(r io.Reader) (Message, error) {
 		return m, fmt.Errorf("error unmarshaling message data: %v", err)
 	}
 
+	// In the cases above, we had to pass a pointer to unmarshal the
+	// data correctly.  We could just return the message with Data
+	// as the pointer type, but this creates a lot of unnecessary
+	// pointer dereferencing for the client.
+	//
+	// Instead, we dereference the pointers here, setting the data
+	// fields to the dereferenced values.
+	switch h.mtype {
+	case MTypeHello:
+		hd := m.Data.(*HelloData)
+		if hd == nil {
+			m.Data = nil
+			return m, fmt.Errorf("HELLO message lacks data")
+		}
+		m.Data = *hd
+	case MTypeJob:
+		tl := m.Data.(*[]fuq.Task)
+		if tl == nil {
+			m.Data = nil
+			return m, fmt.Errorf("JOB message lacks data")
+		}
+		m.Data = *tl
+	case MTypeCancel:
+		tp := m.Data.(*[]fuq.TaskPair)
+		if tp == nil {
+			m.Data = nil
+			return m, fmt.Errorf("CANCEL message lacks data")
+		}
+		m.Data = *tp
+	case MTypeUpdate:
+		upd := m.Data.(*fuq.JobStatusUpdate)
+		if upd == nil {
+			m.Data = nil
+			return m, fmt.Errorf("UPDATE message lacks data")
+		}
+		m.Data = *upd
+	}
+
 	return m, nil
 }
 
