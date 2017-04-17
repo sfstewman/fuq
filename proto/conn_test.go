@@ -227,11 +227,71 @@ func (t *testConn) Close() {
 	callCloseIfNonNil(t.pforeman)
 }
 
+type msgExpect struct {
+	recvCh, replCh, retCh chan proto.Message
+	errCh                 chan error
+}
+
+func newMsgExpect() msgExpect {
+	return msgExpect{
+		recvCh: make(chan proto.Message),
+		replCh: make(chan proto.Message),
+		retCh:  make(chan proto.Message),
+		errCh:  make(chan error),
+	}
+}
+
+func (me msgExpect) Handle(msg proto.Message) proto.Message {
+	me.recvCh <- msg
+	return <-me.replCh
+}
+
+func (me msgExpect) SendAndReceive(ctx context.Context, conn *proto.Conn, mesg, repl proto.Message) (received proto.Message, err error) {
+	// Send a JOB message, make sure we receive it.
+	go func() {
+		msg, err := conn.SendMessage(ctx, mesg)
+		if err != nil {
+			me.errCh <- err
+			return
+		}
+		me.retCh <- msg
+	}()
+
+	select {
+	case received = <-me.recvCh:
+		/* continue, send reply */
+
+	case err = <-me.errCh:
+		err = fmt.Errorf("error while sending initial message: %v", err)
+		return
+	}
+
+	repl.Seq = received.Seq
+	me.replCh <- repl
+
+	select {
+	case retMsg := <-me.retCh:
+		if !reflect.DeepEqual(retMsg, repl) {
+			err = fmt.Errorf("expected send to return with '%v' but found '%v'",
+				repl, retMsg)
+			return
+		}
+
+	case err = <-me.errCh:
+		err = fmt.Errorf("error while receiving reply: %v", err)
+		return
+	}
+
+	return
+}
+
 func runTestsWithRig(mk testRigMaker, t *testing.T) {
 	t.Run("OnMessage", testWithRig(mk, OnMessageTest))
+	t.Run("OnAnyMessage", testWithRig(mk, OnAnyMessageTest))
 	t.Run("SendJob", testWithRig(mk, SendJobTest))
 	t.Run("SendUpdate", testWithRig(mk, SendUpdateTest))
 	t.Run("SendCancel", testWithRig(mk, SendCancelTest))
+	// t.Run("SendInfo", testWithRig(mk, SendInfoTest))
 	t.Run("SendStop", testWithRig(mk, SendStopTest))
 	t.Run("SendHello", testWithRig(mk, SendHelloTest))
 	t.Run("SecondSendBlocksUntilReply", testWithRig(mk, SecondSendBlocksUntilReplyTest))
@@ -256,50 +316,89 @@ func TestWebSocket(t *testing.T) {
 }
 
 func OnMessageTest(tc connTestRigger, t *testing.T) {
-	syncCh, mcw, mcf := tc.SyncCh(), tc.MCW(), tc.MCF()
-	received := proto.Message{}
+	_, mcw, mcf := tc.SyncCh(), tc.MCW(), tc.MCF()
+	expect := newMsgExpect()
 
-	mcw.OnMessageFunc(proto.MTypeJob, func(msg proto.Message) proto.Message {
-		received = msg
-		close(syncCh)
-		return proto.OkayMessage(17, 5, msg.Seq)
-	})
+	mcw.OnMessage(proto.MTypeJob, expect)
 
 	ctx := tc.Context()
 	fuqtest.GoPanicOnError(ctx, mcw.ConversationLoop)
 	fuqtest.GoPanicOnError(ctx, mcf.ConversationLoop)
 
-	job := fuq.Task{Task: 23, JobDescription: fuq.JobDescription{JobId: fuq.JobId(7)}}
+	jobs := []fuq.Task{{Task: 23, JobDescription: fuq.JobDescription{JobId: fuq.JobId(7)}}}
 
-	msg, err := mcf.SendJob(ctx, []fuq.Task{job})
+	received, err := expect.SendAndReceive(ctx, mcf,
+		proto.Message{Type: proto.MTypeJob, Data: jobs},
+		proto.OkayMessage(17, 5, 0))
+
 	if err != nil {
-		t.Fatalf("error sending job: %v", err)
+		t.Fatal(err)
 	}
-
-	rnp, rnr := msg.AsOkay()
-	if rnp != 17 || rnr != 5 {
-		t.Errorf("expected reply of OK(17|5) but received OK(%d|%d)", rnp, rnr)
-	}
-
-	// make sure the OnMessage handler was called...
-	<-syncCh
-	tc.NilSyncCh()
 
 	if received.Type != proto.MTypeJob {
 		t.Errorf("wrong job type, expected JOB, found %d", received.Type)
 	}
 
-	recvJob, ok := received.Data.([]fuq.Task)
-	if !ok {
-		t.Fatalf("wrong data type, expected []fuq.Task, found %T", received.Data)
+	if !reflect.DeepEqual(received.Data, jobs) {
+		t.Fatalf("expected '%v', found '%v'", jobs, received.Data)
+	}
+}
+
+func OnAnyMessageTest(tc connTestRigger, t *testing.T) {
+	var (
+		_, mcw, mcf = tc.SyncCh(), tc.MCW(), tc.MCF()
+	)
+
+	expect := newMsgExpect()
+	mcw.OnAnyMessage(expect)
+
+	ctx := tc.Context()
+	fuqtest.GoPanicOnError(ctx, mcw.ConversationLoop)
+	fuqtest.GoPanicOnError(ctx, mcf.ConversationLoop)
+
+	jobs := []fuq.Task{{Task: 23, JobDescription: fuq.JobDescription{JobId: fuq.JobId(7)}}}
+
+	received, err := expect.SendAndReceive(ctx, mcf,
+		proto.Message{Type: proto.MTypeJob, Data: jobs},
+		proto.OkayMessage(17, 5, 0))
+
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	if len(recvJob) != 1 {
-		t.Fatalf("expected one job item, found %d", len(recvJob))
+	if received.Type != proto.MTypeJob {
+		t.Errorf("wrong job type, expected JOB, found %d", received.Type)
 	}
 
-	if job != recvJob[0] {
-		t.Errorf("sent job %v, received job %v", job, recvJob[0])
+	if !reflect.DeepEqual(received.Data, jobs) {
+		t.Fatalf("expected Data to be %#v, but found %#v", jobs, received.Data)
+	}
+
+	// Send an UPDATE message, make sure we receive it and can reply
+	// to it
+	upd := fuq.JobStatusUpdate{
+		JobId:   19,
+		Task:    5,
+		Success: true,
+		Status:  "done",
+	}
+	received, err = expect.SendAndReceive(ctx, mcf,
+		proto.Message{
+			Type: proto.MTypeUpdate,
+			Data: upd,
+		},
+		proto.OkayMessage(7, 13, 0))
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if received.Type != proto.MTypeUpdate {
+		t.Errorf("wrong message type, expected UPDATE, found %d", received.Type)
+	}
+
+	if !reflect.DeepEqual(received.Data, upd) {
+		t.Fatalf("expected Data to be %#v, but found %#v", upd, received.Data)
 	}
 }
 
@@ -447,7 +546,7 @@ func SendCancelTest(tc connTestRigger, t *testing.T) {
 	}
 
 	if !reflect.DeepEqual(usend, urecv) {
-		t.Errorf("UPDATE received, but update = %v, expected %v", *urecvPtr, usend)
+		t.Errorf("UPDATE received, but update = %v, expected %v", urecv, usend)
 	}
 
 	checkOK(t, resp, 12, 3)
@@ -523,7 +622,7 @@ func SendHelloTest(tc connTestRigger, t *testing.T) {
 	}
 
 	if !reflect.DeepEqual(hello, hrecv) {
-		t.Errorf("HELLO received, but update = %v, expected %v", *hrecvPtr, hello)
+		t.Errorf("HELLO received, but update = %v, expected %v", hrecv, hello)
 	}
 
 	checkOK(t, resp, 4, 3)

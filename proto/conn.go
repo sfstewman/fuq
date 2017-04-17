@@ -108,6 +108,12 @@ func (mc *Conn) OnMessageFunc(mt MType, f MessageHandlerFunc) {
 	mc.OnMessage(mt, f)
 }
 
+func (mc *Conn) OnAnyMessage(h MessageHandler) {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	mc.handlers[0] = h
+}
+
 func (mc *Conn) sendError(ctx context.Context, errorCh chan<- reply, r reply) {
 	// if the context is canceled, don't send an error
 	if ctx.Err() != nil {
@@ -268,7 +274,7 @@ recv_loop:
 		case msg := <-outgoingCh:
 			seq, err := mc.xmitWithSeq(msg.M)
 			if err != nil {
-				log.Printf("error transmiting message %v", msg.M)
+				log.Printf("error transmiting message %v: %v", msg.M, err)
 				msg.R <- reply{E: err}
 				continue
 			}
