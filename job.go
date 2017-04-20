@@ -226,6 +226,14 @@ type JobTaskData struct {
 	ErrorMessages []string
 }
 
+type JobRunning struct {
+	JobId    JobId
+	Task     int
+	Node     string
+	UniqName string
+	Pid      int
+}
+
 func (tasks *JobTaskData) Update(update JobStatusUpdate) error {
 	ind := sort.SearchInts(tasks.Running, update.Task)
 	if ind >= len(tasks.Running) || tasks.Running[ind] != update.Task {

@@ -405,6 +405,14 @@ func (mc *Conn) SendUpdate(ctx context.Context, update fuq.JobStatusUpdate) (Mes
 	return mc.sendMessage(ctx, MTypeUpdate, update)
 }
 
+func (mc *Conn) SendListRequest(ctx context.Context) (Message, error) {
+	return mc.sendMessage(ctx, MTypeUpdate, nil)
+}
+
+func (mc *Conn) SendListResponse(ctx context.Context, running []fuq.JobRunning) (Message, error) {
+	return mc.sendMessage(ctx, MTypeUpdate, running)
+}
+
 func (mc *Conn) SendCancel(ctx context.Context, cancel []fuq.TaskPair) (Message, error) {
 	return mc.sendMessage(ctx, MTypeCancel, cancel)
 }

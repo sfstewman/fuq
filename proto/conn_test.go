@@ -291,7 +291,7 @@ func runTestsWithRig(mk testRigMaker, t *testing.T) {
 	t.Run("SendJob", testWithRig(mk, SendJobTest))
 	t.Run("SendUpdate", testWithRig(mk, SendUpdateTest))
 	t.Run("SendCancel", testWithRig(mk, SendCancelTest))
-	// t.Run("SendInfo", testWithRig(mk, SendInfoTest))
+	t.Run("SendList", testWithRig(mk, SendStopTest))
 	t.Run("SendStop", testWithRig(mk, SendStopTest))
 	t.Run("SendHello", testWithRig(mk, SendHelloTest))
 	t.Run("SecondSendBlocksUntilReply", testWithRig(mk, SecondSendBlocksUntilReplyTest))
@@ -550,6 +550,109 @@ func SendCancelTest(tc connTestRigger, t *testing.T) {
 	}
 
 	checkOK(t, resp, 12, 3)
+}
+
+func SendListTest(tc connTestRigger, t *testing.T) {
+	_, mcw, mcf := tc.SyncCh(), tc.MCW(), tc.MCF()
+	msgCh := make(chan proto.Message)
+	errCh := make(chan error)
+
+	mcw.OnMessageFunc(proto.MTypeList, func(msg proto.Message) proto.Message {
+		msgCh <- msg
+		return proto.OkayMessage(9, 5, msg.Seq)
+	})
+
+	mcf.OnMessageFunc(proto.MTypeList, func(msg proto.Message) proto.Message {
+		msgCh <- msg
+		return proto.OkayMessage(3, 12, msg.Seq)
+	})
+
+	ctx := tc.Context()
+	fuqtest.GoPanicOnError(ctx, mcw.ConversationLoop)
+	fuqtest.GoPanicOnError(ctx, mcf.ConversationLoop)
+
+	// First, send a LIST request
+	go func() {
+		resp, err := mcf.SendListRequest(ctx)
+		if err != nil {
+			errCh <- err
+			return
+		}
+
+		if np, nr := resp.AsOkay(); np != 9 || nr != 5 {
+			errCh <- fmt.Errorf("expected OK(9|5) but found OK(%d|%d)", np, nr)
+			return
+		}
+
+		errCh <- nil
+	}()
+
+	received := <-msgCh
+	err := <-errCh
+
+	if err != nil {
+		t.Fatalf("error sending LIST request: %v", err)
+	}
+
+	expected := proto.Message{
+		Type: proto.MTypeList,
+		Data: nil,
+		Seq:  received.Seq,
+	}
+	if !reflect.DeepEqual(received, expected) {
+		t.Fatalf("expected LIST request '%v', but found '%v'",
+			expected, received)
+	}
+
+	// Now send a LIST response
+	listResp := []fuq.JobRunning{
+		{
+			JobId:    13,
+			Task:     1,
+			Node:     "voltron",
+			UniqName: "voltron:13134:1",
+			Pid:      763,
+		},
+		{
+			JobId:    7,
+			Task:     3,
+			Node:     "thundercat",
+			UniqName: "thundercat:943:1",
+			Pid:      12457,
+		},
+	}
+
+	go func() {
+		resp, err := mcw.SendListResponse(ctx, listResp)
+		if err != nil {
+			errCh <- err
+			return
+		}
+
+		if np, nr := resp.AsOkay(); np != 3 || nr != 12 {
+			errCh <- fmt.Errorf("expected OK(9|5) but found OK(%d|%d)", np, nr)
+			return
+		}
+
+		errCh <- nil
+	}()
+
+	received = <-msgCh
+	err = <-errCh
+
+	if err != nil {
+		t.Fatalf("error sending LIST request: %v", err)
+	}
+
+	expected = proto.Message{
+		Type: proto.MTypeList,
+		Data: listResp,
+		Seq:  received.Seq,
+	}
+	if !reflect.DeepEqual(received, expected) {
+		t.Fatalf("expected LIST request '%v', but found '%v'",
+			expected, received)
+	}
 }
 
 func SendStopTest(tc connTestRigger, t *testing.T) {
