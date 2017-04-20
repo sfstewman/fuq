@@ -63,8 +63,9 @@ func workerListCmd(cfg fuq.Config, args []string) error {
 
 func workerStopCmd(cfg fuq.Config, args []string) error {
 	var (
-		tag string
-		all bool
+		tag     string
+		all     bool
+		listMsg fuq.ClientNodeListReq
 	)
 
 	flags := flag.NewFlagSet("workerStop", flag.ContinueOnError)
@@ -87,7 +88,7 @@ func workerStopCmd(cfg fuq.Config, args []string) error {
 	}
 
 	nodes := []fuq.NodeInfo{}
-	if err := callEndpoint(cfg, "client/nodes/list", nil, &nodes); err != nil {
+	if err := callEndpoint(cfg, "client/nodes/list", listMsg, &nodes); err != nil {
 		return fmt.Errorf("Error encountered retrieving worker nodes: %v", err)
 	}
 
@@ -138,7 +139,7 @@ func workerStopCmd(cfg fuq.Config, args []string) error {
 
 	msg := fuq.ClientNodeShutdownReq{UniqNames: names}
 
-	if err := callEndpoint(cfg, srv.ClientNodeShutdownPath, &msg, nil); err != nil {
+	if err := callEndpoint(cfg, srv.ClientNodeShutdownPath, msg, nil); err != nil {
 		return fmt.Errorf("Error encountered shutting down worker nodes: %v", err)
 	}
 
