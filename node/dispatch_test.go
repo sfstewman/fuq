@@ -8,7 +8,6 @@ import (
 	"reflect"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -125,7 +124,7 @@ func (dts *dispatcherTestState) startServer() (*proto.Conn, chan proto.Message, 
 
 		// this cheats, but we're not testing whether the
 		// foreman can keep track of this here
-		np, nr := d.NumProcs()
+		np, nr, _ := d.NumProcs()
 		return proto.OkayMessage(uint16(np), uint16(nr), m.Seq)
 	})
 
@@ -276,21 +275,57 @@ func TestDispatcherStop(t *testing.T) {
 
 // node.Runner that blocks until the context is canceled
 type blockingRunner struct {
-	T        *testing.T
-	nrunning int64
-	started  chan int
-	ended    chan int
-	wg       sync.WaitGroup
+	T *testing.T
+
+	mu sync.Mutex
+
+	running map[fuq.TaskPair]chan struct{}
+	// nrunning int64
+
+	started chan int
+	ended   chan int
+
+	wg sync.WaitGroup
 }
 
 func (br *blockingRunner) NumRunning() int {
-	c := atomic.LoadInt64(&br.nrunning)
-	return int(c)
+	br.mu.Lock()
+	defer br.mu.Unlock()
+
+	return len(br.running)
+}
+
+func (br *blockingRunner) addTask(pair fuq.TaskPair) (finish chan struct{}) {
+	finish = make(chan struct{})
+
+	br.mu.Lock()
+	defer br.mu.Unlock()
+
+	br.running[pair] = finish
+	return finish
+}
+
+func (br *blockingRunner) delTask(pair fuq.TaskPair) {
+	br.mu.Lock()
+	defer br.mu.Unlock()
+	delete(br.running, pair)
+}
+
+func (br *blockingRunner) finishTask(pair fuq.TaskPair) {
+	br.mu.Lock()
+	finish := br.running[pair]
+	br.running[pair] = nil
+	br.mu.Unlock()
+
+	if finish != nil {
+		close(finish)
+	}
 }
 
 func (br *blockingRunner) Run(ctx context.Context, t fuq.Task, w *Worker) (fuq.JobStatusUpdate, error) {
-	atomic.AddInt64(&br.nrunning, 1)
-	defer atomic.AddInt64(&br.nrunning, -1)
+	pair := fuq.TaskPair{JobId: t.JobId, Task: t.Task}
+	finish := br.addTask(pair)
+	defer br.delTask(pair)
 
 	br.wg.Add(1)
 	defer br.wg.Done()
@@ -305,8 +340,11 @@ func (br *blockingRunner) Run(ctx context.Context, t fuq.Task, w *Worker) (fuq.J
 		return fuq.JobStatusUpdate{}, ctx.Err()
 	}
 
-	// block until the context is canceled
-	<-ctx.Done()
+	// block until the finish signal or the context is canceled
+	select {
+	case <-ctx.Done():
+	case <-finish:
+	}
 
 	// signal that we're ending
 	br.ended <- t.Task
@@ -322,12 +360,17 @@ func (br *blockingRunner) Run(ctx context.Context, t fuq.Task, w *Worker) (fuq.J
 	}, ctx.Err()
 }
 
-func TestDispatcherCancel(t *testing.T) {
-	runner := &blockingRunner{
+func newBlockingRunner(t *testing.T) *blockingRunner {
+	return &blockingRunner{
 		T:       t,
 		started: make(chan int),
 		ended:   make(chan int),
+		running: make(map[fuq.TaskPair]chan struct{}),
 	}
+}
+
+func TestDispatcherCancel(t *testing.T) {
+	runner := newBlockingRunner(t)
 
 	dts := newDispatcherTestState(2, runner)
 	defer dts.Close()
@@ -486,6 +529,141 @@ func TestDispatcherCancel(t *testing.T) {
 
 	// wait
 	runner.wg.Wait()
+}
+
+func TestDispatcherStopFinishesWhenJobsFinish(t *testing.T) {
+	runner := newBlockingRunner(t)
+
+	dts := newDispatcherTestState(2, runner)
+	defer dts.Close()
+
+	ctx := dts.ctx
+	server, msgCh, _ := dts.startServer()
+
+	log.Printf("T %s: runner       = %p", t.Name(), runner)
+	log.Printf("T %s: dispatcher   = %p", t.Name(), dts.dispatcher)
+	log.Printf("T %s: C proto.Conn = %p\n", t.Name(), dts.dispatcher.M)
+	log.Printf("T %s: S proto.Conn = %p\n", t.Name(), server)
+	log.Printf("T %s: messenger    = %p\n", t.Name(), dts.dispatcher.Messenger)
+
+	hello := <-msgCh
+	hdata := hello.Data.(proto.HelloData)
+	if hdata.NumProcs != 2 {
+		t.Errorf("invalid HELLO: expected NumProcs = %d, found %d",
+			2, hdata.NumProcs)
+	}
+
+	if len(hdata.Running) != 0 {
+		t.Errorf("invalid HELLO: expected #Running = %d, found %d",
+			0, len(hdata.Running))
+	}
+
+	tasks := []fuq.Task{
+		fuq.Task{
+			Task: 3,
+			JobDescription: fuq.JobDescription{
+				JobId:      fuq.JobId(7),
+				Name:       "this_job",
+				NumTasks:   3,
+				WorkingDir: ".",
+				LoggingDir: ".",
+				Command:    "/bin/true", // XXX - make more portable!
+			},
+		},
+		fuq.Task{
+			Task: 9,
+			JobDescription: fuq.JobDescription{
+				JobId:      fuq.JobId(7),
+				Name:       "this_job",
+				NumTasks:   3,
+				WorkingDir: ".",
+				LoggingDir: ".",
+				Command:    "/bin/true", // XXX - make more portable!
+			},
+		},
+	}
+
+	resp, err := server.SendJob(ctx, tasks)
+
+	// make sure both jobs haved started
+	<-runner.started
+	<-runner.started
+
+	if err != nil {
+		t.Fatalf("error sending tasks: %v", err)
+	}
+
+	switch resp.Type {
+	case proto.MTypeOK:
+		// okay
+	case proto.MTypeError:
+		errcode, arg0 := resp.AsError()
+		t.Fatalf("error response: code = %d, arg = %d", errcode, arg0)
+	default:
+		t.Fatalf("unknown respone type: %s", resp.Type)
+	}
+
+	if nr := runner.NumRunning(); nr != 2 {
+		t.Fatalf("NumRunning = %d, but expected 2", nr)
+	}
+
+	// Send STOP
+
+	resp, err = server.SendStop(ctx, 2)
+	if err != nil {
+		t.Fatalf("error sending tasks: %v", err)
+	}
+
+	np, nr := resp.AsOkay()
+	if np != 0 || nr != 2 {
+		t.Errorf("expected OK(%d|%d), but received OK(%d|%d)",
+			0, 2, np, nr)
+	}
+
+	runner.finishTask(fuq.TaskPair{7, 3})
+	if tnum := <-runner.ended; tnum != 3 {
+		t.Fatalf("expected ending task to be 3, but found %d", tnum)
+	}
+	upd := <-msgCh
+	expected := proto.Message{
+		Type: proto.MTypeUpdate,
+		Data: fuq.JobStatusUpdate{
+			JobId:   7,
+			Task:    3,
+			Success: true,
+			Status:  "done",
+		},
+		Seq: upd.Seq,
+	}
+
+	if !reflect.DeepEqual(upd, expected) {
+		t.Fatalf("expected UPDATE to be '%v', but found '%v'",
+			expected, upd)
+	}
+
+	runner.finishTask(fuq.TaskPair{7, 9})
+	if tnum := <-runner.ended; tnum != 9 {
+		t.Fatalf("expected ending task to be 9, but found %d", tnum)
+	}
+	upd = <-msgCh
+	expected = proto.Message{
+		Type: proto.MTypeUpdate,
+		Data: fuq.JobStatusUpdate{
+			JobId:   7,
+			Task:    9,
+			Success: true,
+			Status:  "done",
+		},
+		Seq: upd.Seq,
+	}
+
+	if !reflect.DeepEqual(upd, expected) {
+		t.Fatalf("expected UPDATE to be '%v', but found '%v'",
+			expected, upd)
+	}
+
+	// now wait for dispatch to stop
+	<-dts.dispatchSignal
 }
 
 func TestDispatcherStopImmed(t *testing.T) {

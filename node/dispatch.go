@@ -64,7 +64,12 @@ type Dispatch struct {
 	workers []*Worker
 	tasks   []fuq.Task
 
-	stopSignal chan struct{}
+	nstop int
+
+	signals struct {
+		workerFinished chan struct{}
+		stop           chan struct{}
+	}
 
 	Logger        *log.Logger
 	Queuer        channelQueuer
@@ -103,6 +108,8 @@ func (d *Dispatch) runWorker(ctx context.Context, worker *Worker) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	d.signalWorkerFinished()
+
 	ind := -1
 	for i, w := range d.workers {
 		if w == worker {
@@ -117,6 +124,36 @@ func (d *Dispatch) runWorker(ctx context.Context, worker *Worker) {
 		copy(d.workers[ind:n-1], d.workers[ind+1:])
 		d.workers = d.workers[:n-1]
 	}
+}
+
+func (d *Dispatch) signalWorkerFinished() {
+	// d.mu LOCK MUST BE HELD BY CALLER
+
+	signal := d.signals.workerFinished
+	d.signals.workerFinished = nil
+
+	if signal == nil {
+		return
+	}
+
+	log.Printf("node.Dispatch(%p): closing workerFinished (%v)",
+		d, signal)
+	close(signal)
+}
+
+func (d *Dispatch) runningState() (nproc, nrun, nstop int, signal chan struct{}) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	nproc, nrun = d.numProcs()
+	nstop = d.nstop
+
+	signal = make(chan struct{})
+	d.signals.workerFinished = signal
+	log.Printf("node.Dispatch(%p): created new workerFinished signal (%v)",
+		d, signal)
+
+	return nproc, nrun, nstop, signal
 }
 
 func (d *Dispatch) StartWorkers(ctx context.Context, n int, r Runner) {
@@ -224,11 +261,13 @@ func (d *Dispatch) numProcs() (nproc, nrun int) {
 	return
 }
 
-func (d *Dispatch) NumProcs() (nproc, nrun int) {
+func (d *Dispatch) NumProcs() (nproc, nrun, nstop int) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	return d.numProcs()
+	nproc, nrun = d.numProcs()
+	nstop = d.nstop
+	return nproc, nrun, nstop
 }
 
 func checkOK(m proto.Message, nproc, nrun uint16) error {
@@ -253,22 +292,45 @@ func checkOK(m proto.Message, nproc, nrun uint16) error {
 }
 
 func (d *Dispatch) sendStop(isImmed bool, waitCh chan struct{}) error {
+	act := StopAction{All: isImmed, WaitChan: waitCh}
+	return d.enqueueAction(act)
+}
+
+func (d *Dispatch) sendStopIfAnyToStop() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	act := StopAction{All: isImmed, WaitChan: waitCh}
-	return d.enqueueAction(act)
+	if d.nstop == 0 {
+		return nil
+	}
+
+	log.Printf("node.Dispatch(%p): nstop=%d, sending STOP", d, d.nstop)
+
+	waitCh := make(chan struct{})
+	if err := d.sendStop(false, waitCh); err != nil {
+		return err
+	}
+
+	<-waitCh
+	d.nstop--
+	log.Printf("node.Dispatch(%p): STOP received, nstop=", d, d.nstop)
+	return nil
 }
 
 func (d *Dispatch) Stop() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.stopSignal == nil {
+	d.stop()
+}
+
+func (d *Dispatch) stop() {
+	// LOCK MUST BE HELD BY CALLER
+	if d.signals.stop == nil {
 		return
 	}
 
-	close(d.stopSignal)
-	d.stopSignal = nil
+	close(d.signals.stop)
+	d.signals.stop = nil
 }
 
 func (d *Dispatch) onStop(msg proto.Message) proto.Message {
@@ -276,42 +338,49 @@ func (d *Dispatch) onStop(msg proto.Message) proto.Message {
 		nproc, nrun int
 	)
 
-	nproc, nrun = d.NumProcs()
+	d.mu.Lock()
+	defer d.mu.Unlock()
 
-	np := msg.AsStop()
+	nproc, nrun = d.numProcs()
+	nstop := msg.AsStop()
+	if nstop == 0 {
+		nstop = 1
+	}
+
 	isImmed := false
-	if np == 0 {
-		np = 1
-	}
-
-	if np == proto.StopImmed {
+	if nstop == proto.StopImmed {
 		isImmed = true
-		np = 1
+		nstop = 1
 	}
 
+	np := nstop
 	if np > uint32(nproc) {
 		np = uint32(nproc)
 	}
 
-	log.Printf("stopping %d workers", np)
+	log.Printf("node.Dispatch(%p): STOP(%#v) received, stopping %d workers", d, msg, np)
 
 	for i := uint32(0); i < np; i++ {
 		waitCh := make(chan struct{})
 		if err := d.sendStop(isImmed, waitCh); err != nil {
-			nproc, nrun := d.NumProcs()
+			nproc, nrun := d.numProcs()
 			log.Printf("error enqueuing %d stop requests: %v", np, err)
 			return proto.ErrorMessage(proto.MErrNoProcs,
 				proto.NProcsToU32(uint16(nproc), uint16(nrun)),
 				msg.Seq)
 		}
 		<-waitCh
+		nstop--
+		nproc--
 	}
+
+	// remaining left to stop
+	d.nstop = int(nstop)
 
 	if isImmed {
-		d.Stop()
+		d.stop()
 	}
 
-	nproc, nrun = d.NumProcs()
 	return proto.OkayMessage(uint16(nproc), uint16(nrun), msg.Seq)
 }
 
@@ -489,12 +558,12 @@ func (d *Dispatch) QueueLoop(ctx context.Context) error {
 	stopSignal := make(chan struct{})
 
 	d.mu.Lock()
-	if d.stopSignal != nil {
+	if d.signals.stop != nil {
 		d.mu.Unlock()
 		panic("queue loop already started")
 	}
 
-	d.stopSignal = stopSignal
+	d.signals.stop = stopSignal
 	d.mu.Unlock()
 
 	errCh := make(chan error)
@@ -511,6 +580,13 @@ func (d *Dispatch) QueueLoop(ctx context.Context) error {
 
 	for {
 		updCh := d.Queuer.updCh
+		np, nr, ns, wsig := d.runningState()
+		log.Printf("node.Dispatch(%p): np=%d, nr=%d, ns=%d", d, np, nr, ns)
+
+		if np == 0 && nr == 0 {
+			log.Printf("node.Dispatch(%p): no remaining workers, stopping", d)
+			return nil
+		}
 
 		// Check for: job update, cancellation
 		select {
@@ -519,10 +595,19 @@ func (d *Dispatch) QueueLoop(ctx context.Context) error {
 			return err
 
 		case upd := <-updCh:
+			log.Printf("node.Dispatch(%p): UPDATE for job %d, task %d (status=%s)",
+				d, upd.JobId, upd.Task, upd.Status)
 			if err := d.sendUpdate(ctx, upd); err != nil {
-				log.Printf("error sending update for job %d, task %d (status=%s): %v",
-					upd.JobId, upd.Task, upd.Status, err)
+				log.Printf("node.Dispatch(%p): error sending update for job %d, task %d (status=%s): %v",
+					d, upd.JobId, upd.Task, upd.Status, err)
 			}
+
+			if err := d.sendStopIfAnyToStop(); err != nil {
+				log.Printf("node.Dispatch(%p): error sending STOP: %v", d, err)
+			}
+
+		case <-wsig:
+			log.Printf("node.Dispatch(%p): worker finished", d)
 
 		case <-stopSignal:
 			log.Print("Dispatch: STOP signaled")
