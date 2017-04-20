@@ -24,6 +24,9 @@ type persistentConn struct {
 	helloSignal chan struct{}
 	stopSignal  chan struct{}
 
+	// canceled channel
+	Canceled chan []fuq.TaskPair
+
 	nproc, nrun, nstop uint16
 }
 
@@ -41,6 +44,7 @@ func newPersistentConn(f *Foreman, ni fuq.NodeInfo, messenger *websocket.Messeng
 		NodeInfo:    ni,
 		helloSignal: make(chan struct{}),
 		stopSignal:  make(chan struct{}),
+		Canceled:    make(chan []fuq.TaskPair),
 	}
 
 	pconn.OnMessageFunc(proto.MTypeHello, pc.onHello)
@@ -125,7 +129,7 @@ func (pc *persistentConn) numProcAvail() (int, chan struct{}) {
 	defer pc.mu.Unlock()
 
 	nproc := int(pc.nproc)
-	if nproc > 0 {
+	if nproc > 0 || pc.nrun == 0 {
 		return nproc, nil
 	}
 
@@ -137,37 +141,54 @@ func (pc *persistentConn) numProcAvail() (int, chan struct{}) {
 	return 0, ready
 }
 
-func (pc *persistentConn) waitOnWorkers(ctx context.Context, errCh <-chan error) (int, error) {
-	f := pc.F
-	ni := pc.NodeInfo
-	for {
-		nproc, ready := pc.numProcAvail()
-		if nproc > 0 {
-			return nproc, nil
+/*
+waitOnWorkers:
+	select {
+	case <-ready:
+		continue
+
+	case <-wakeup:
+		if f.IsNodeShutdown(ni.UniqName) {
+			return 0, nil
 		}
 
-		wakeup := f.ready(true)
+	case err := <-errCh:
+		log.Printf("pconn(%p): received error %v from errCh", pc, err)
+		if err != nil {
+			return 0, err
+		}
+		return 0, proto.ErrClosed
+
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+
+waitForStop:
+	select {
+	case <-stopSignal:
+		return nil
+
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+Loop():
+	if len(tasks) == 0 {
+		tasksAvail := f.ready(false)
+		f.jobsSignal.mu.Unlock()
 
 		select {
-		case <-ready:
+		case <-tasksAvail:
+			log.Printf("pc(%p): tasksAvail signal", pc)
 			continue
 
+		case <-loopCtx.Done():
+			break loop
 		case err := <-errCh:
-			log.Printf("pconn(%p): received error %v from errCh", pc, err)
-			if err != nil {
-				return 0, err
-			}
-			return 0, proto.ErrClosed
-
-		case <-wakeup:
-			if f.IsNodeShutdown(ni.UniqName) {
-				return 0, nil
-			}
-		case <-ctx.Done():
-			return 0, ctx.Err()
+			return err
 		}
 	}
-}
+*/
 
 func (pc *persistentConn) sendStop(ctx context.Context) error {
 	pc.mu.Lock()
@@ -229,14 +250,43 @@ func (pc *persistentConn) sendJobs(ctx context.Context, tasks []fuq.Task) error 
 	return nil
 }
 
-func (pc *persistentConn) waitForStop(ctx context.Context) error {
-	stopSignal := pc.stopSignal
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-stopSignal:
-		return nil
+func (pc *persistentConn) sendCancel(ctx context.Context, pairs []fuq.TaskPair) error {
+	log.Printf("pconn(%p): sending CANCEL(%v)", pc, pairs)
+
+	resp, err := pc.C.SendCancel(ctx, pairs)
+	if err != nil {
+		return err
 	}
+
+	if resp.Type != proto.MTypeOK {
+		return fmt.Errorf("error in reply: %v", resp)
+	}
+
+	nc, _ := resp.AsOkay()
+	log.Printf("pconn(%p): found %d tasks to cancel", nc)
+
+	return nil
+}
+
+func (pc *persistentConn) fetchTasks(nproc int) (tasks []fuq.Task, tasksAvail <-chan struct{}, err error) {
+	f := pc.F
+
+	f.jobsSignal.mu.Lock()
+	defer f.jobsSignal.mu.Unlock()
+
+	// request jobs
+	tasks, err = f.FetchPendingTasks(nproc)
+	if err != nil {
+		log.Printf("error fetching tasks: %v", err)
+		return
+	}
+
+	if len(tasks) > 0 {
+		return
+	}
+
+	tasksAvail = f.ready(false)
+	return
 }
 
 func (pc *persistentConn) Loop(ctx context.Context) error {
@@ -270,63 +320,115 @@ func (pc *persistentConn) Loop(ctx context.Context) error {
 
 loop:
 	for {
-		nproc, err := pc.waitOnWorkers(loopCtx, errCh)
-		if err == proto.ErrClosed {
-			fmt.Printf("pconn(%p): stopping the loop", pc)
-			return nil
-		}
+		// events:
+		//
+		//   context canceled
+		//   error occured
+		//
+		//   nodes available
+		//   wakeup requested (jobs available or stop condition)
+		//   job canceled
+		//
+		//   job sent
+		//
+		// three main waiting states and a sending state:
+		//	1. for nodes
+		//		events: nodes available, job canceled
+		//
+		//	2. for jobs
+		//		events: job available, job canceled
+		//
+		//	3. to stop
+		//		events: job canceled
+		//
+		//
 
-		if err != nil {
-			return err
-		}
+		var (
+			workersAvail <-chan struct{}
+			tasksAvail   <-chan struct{}
+			stopSignal   <-chan struct{}
 
+			nproc int
+			tasks []fuq.Task
+			err   error
+		)
+
+		nproc, workersAvail = pc.numProcAvail()
+
+		// check if node is shut down
 		if f.IsNodeShutdown(uniqName) {
 			if err := pc.sendStop(loopCtx); err != nil {
 				log.Printf("error sending STOP: %v", err)
 				return err
 			}
-			return pc.waitForStop(loopCtx)
+
+			if nproc == 0 && workersAvail == nil {
+				// we're not waiting for workers, so
+				// just exit
+				return nil
+			}
+
+			stopSignal = pc.stopSignal
+
+			// waiting for the stop signal; don't bother
+			// waiting for workers or tasks
+			goto wait_on_event
 		}
 
 		if nproc == 0 {
-			continue
+			// no workers, so skip fetching tasks
+			goto wait_on_event
 		}
 
-		f.jobsSignal.mu.Lock()
-
-		// request jobs
-		tasks, err := f.FetchPendingTasks(nproc)
+		tasks, tasksAvail, err = pc.fetchTasks(nproc)
 		if err != nil {
-			f.jobsSignal.mu.Unlock()
 			log.Printf("error fetching tasks: %v", err)
 			return err
 		}
 
-		if len(tasks) == 0 {
-			jobsAvail := f.ready(false)
-			f.jobsSignal.mu.Unlock()
-
-			select {
-			case <-loopCtx.Done():
-				break loop
-			case err := <-errCh:
+		if len(tasks) > 0 {
+			if err := pc.sendJobs(loopCtx, tasks); err != nil {
+				log.Printf("error sending tasks: %v", err)
 				return err
-			case <-jobsAvail:
-				log.Printf("pc(%p): jobsAvail signal", pc)
-				continue
 			}
+
+			// XXX - update running list
+			log.Printf("%s: queued %d tasks",
+				pc.NodeInfo.UniqName, len(tasks))
+
+			continue
 		}
 
-		f.jobsSignal.mu.Unlock()
+	wait_on_event:
+		select {
+		case <-loopCtx.Done():
+			log.Printf("pconn(%p): context canceled (%v)", pc, loopCtx.Err())
+			break loop
 
-		if err := pc.sendJobs(loopCtx, tasks); err != nil {
-			log.Printf("error sending tasks: %v", err)
+		case err := <-errCh:
+			log.Printf("pconn(%p): error (%v)", pc, err)
 			return err
+
+		case <-stopSignal:
+			log.Printf("pconn(%p): STOP signaled", pc)
+			break loop
+
+		case pairs := <-pc.Canceled:
+			if err := pc.sendCancel(loopCtx, pairs); err != nil {
+				log.Printf("pconn(%p): error sending CANCEL: %v", pc, err)
+				return err
+			}
+			continue loop
+
+		case <-workersAvail:
+			log.Printf("pc(%p): workers available", pc)
+			continue loop
+
+		case <-tasksAvail:
+			log.Printf("pc(%p): jobs available", pc)
+			continue loop
 		}
 
-		// XXX - update running list
-		log.Printf("%s: queued %d tasks",
-			pc.NodeInfo.UniqName, len(tasks))
 	}
 
 	// check that we didn't miss an error

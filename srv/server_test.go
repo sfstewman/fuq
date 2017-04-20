@@ -2623,3 +2623,306 @@ func TestPConnStop(t *testing.T) {
 		t.Fatalf("expected OK(0|0), but received OK(%d,%d)", np, nr)
 	}
 }
+
+// Tests that canceling a job will cause a CANCEL message to be sent to
+// the workers.  In this test, all workers are occupied.
+func TestCancelJobAllWorkersOccupied(t *testing.T) {
+	s := newTestingServer()
+	mux := SetupRoutes(s)
+
+	jobs := []fuq.JobDescription{
+		{
+			Name:       "job1",
+			NumTasks:   16,
+			WorkingDir: "/foo/bar",
+			LoggingDir: "/foo/bar/logs",
+			Command:    "/foo/foo_it.sh",
+		},
+		{
+			Name:       "job2",
+			NumTasks:   27,
+			WorkingDir: "/foo/baz",
+			LoggingDir: "/foo/baz/logs",
+			Command:    "/foo/baz_it.sh",
+		},
+	}
+
+	for i, j := range jobs {
+		jobs[i].JobId = addJob(t, s.Foreman, j)
+		jobs[i].Status = fuq.Waiting
+	}
+
+	origJobs := make([]fuq.JobDescription, len(jobs))
+	copy(origJobs, jobs)
+
+	wsConn, client := newTestClient(t, s)
+	defer wsConn.Close()
+	defer client.Close()
+
+	ni := client.NodeInfo
+	_ = ni
+
+	msgCh := make(chan proto.Message)
+	taskCh := make(chan []fuq.Task)
+
+	var nproc, nrun uint16 = 8, 0
+	var running []fuq.Task
+	var toCancel []int
+
+	client.OnMessageFunc(proto.MTypeJob, func(msg proto.Message) proto.Message {
+		tasks := msg.Data.([]fuq.Task)
+
+		if len(tasks) > int(nproc) {
+			panic("invalid number of tasks")
+		}
+
+		t.Logf("onJob received %d tasks: %v", len(tasks), tasks)
+		nproc -= uint16(len(tasks))
+		nrun += uint16(len(tasks))
+
+		repl := proto.OkayMessage(nproc, nrun, msg.Seq)
+
+		running = append(running, tasks...)
+
+		taskCh <- tasks
+		return repl
+	})
+
+	client.OnMessageFunc(proto.MTypeCancel, func(msg proto.Message) proto.Message {
+		pairs := msg.Data.([]fuq.TaskPair)
+
+		ncancel := 0
+		for i, t := range running {
+			for _, p := range pairs {
+				if t.JobId != p.JobId {
+					continue
+				}
+
+				if p.Task >= 0 && t.Task != p.Task {
+					continue
+				}
+
+				toCancel = append(toCancel, i)
+				ncancel++
+			}
+		}
+		msgCh <- msg
+
+		repl := proto.OkayMessage(uint16(ncancel), 0, msg.Seq)
+		return repl
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fuqtest.GoPanicOnError(ctx, client.runConversationLoop)
+
+	msg, err := client.SendHello(ctx, proto.HelloData{
+		NumProcs: 8,
+		Running:  nil,
+	})
+
+	if err != nil {
+		t.Fatalf("error in HELLO: %v", err)
+	}
+
+	np, nr := msg.AsOkay()
+	if np != 8 || nr != 0 {
+		t.Fatalf("expected OK(8|0), but received OK(%d|%d)", nproc, nrun)
+	}
+
+	tasks := <-taskCh
+	// JOB message received
+	if len(tasks) != 8 {
+		t.Fatalf("expected 8 task, but received %d tasks", len(tasks))
+	}
+
+	/** Cancel job **/
+	env := ClientRequestEnvelope{
+		Auth: fuq.Client{Password: testingPass, Client: "testing"},
+		Msg: fuq.ClientStateChangeReq{
+			JobIds: []fuq.JobId{jobs[0].JobId},
+			Action: "cancel",
+		},
+	}
+
+	repl := []fuq.JobStateChangeResponse{}
+
+	roundTrip{
+		T:      t,
+		Msg:    env,
+		Dst:    &repl,
+		Target: "/" + ClientJobStatePath,
+	}.ExpectOK(mux.ServeHTTP)
+	t.Logf("response is %v", repl)
+
+	expectedRepl := []fuq.JobStateChangeResponse{
+		{jobs[0].JobId, fuq.Running, fuq.Cancelled},
+	}
+
+	if !reflect.DeepEqual(repl, expectedRepl) {
+		t.Fatalf("expected response '%v' but found '%v'",
+			expectedRepl, repl)
+	}
+
+	/** Receive CANCEL message **/
+	msg = <-msgCh
+	// expect CANCEL message
+
+	expected := proto.Message{
+		Type: proto.MTypeCancel,
+		Seq:  msg.Seq,
+		Data: []fuq.TaskPair{{jobs[0].JobId, -1}},
+	}
+
+	if !reflect.DeepEqual(msg, expected) {
+		t.Fatalf("expected '%v', but found '%v'", expected, msg)
+	}
+}
+
+// Tests that canceling a job will cause a CANCEL message to be sent to
+// the workers.  In this test, only some workers are occupied.
+func TestCancelJobSomeWorkersOccupied(t *testing.T) {
+	s := newTestingServer()
+	mux := SetupRoutes(s)
+
+	jobs := []fuq.JobDescription{
+		{
+			Name:       "job1",
+			NumTasks:   6,
+			WorkingDir: "/foo/bar",
+			LoggingDir: "/foo/bar/logs",
+			Command:    "/foo/foo_it.sh",
+		},
+	}
+
+	for i, j := range jobs {
+		jobs[i].JobId = addJob(t, s.Foreman, j)
+		jobs[i].Status = fuq.Waiting
+	}
+
+	origJobs := make([]fuq.JobDescription, len(jobs))
+	copy(origJobs, jobs)
+
+	wsConn, client := newTestClient(t, s)
+	defer wsConn.Close()
+	defer client.Close()
+
+	ni := client.NodeInfo
+	_ = ni
+
+	msgCh := make(chan proto.Message)
+	taskCh := make(chan []fuq.Task)
+
+	var nproc, nrun uint16 = 8, 0
+	var running []fuq.Task
+	var toCancel []int
+
+	client.OnMessageFunc(proto.MTypeJob, func(msg proto.Message) proto.Message {
+		tasks := msg.Data.([]fuq.Task)
+
+		if len(tasks) > int(nproc) {
+			panic("invalid number of tasks")
+		}
+
+		t.Logf("onJob received %d tasks: %v", len(tasks), tasks)
+		nproc -= uint16(len(tasks))
+		nrun += uint16(len(tasks))
+
+		repl := proto.OkayMessage(nproc, nrun, msg.Seq)
+
+		running = append(running, tasks...)
+
+		taskCh <- tasks
+		return repl
+	})
+
+	client.OnMessageFunc(proto.MTypeCancel, func(msg proto.Message) proto.Message {
+		pairs := msg.Data.([]fuq.TaskPair)
+
+		ncancel := 0
+		for i, t := range running {
+			for _, p := range pairs {
+				if t.JobId != p.JobId {
+					continue
+				}
+
+				if p.Task >= 0 && t.Task != p.Task {
+					continue
+				}
+
+				toCancel = append(toCancel, i)
+				ncancel++
+			}
+		}
+		msgCh <- msg
+
+		repl := proto.OkayMessage(uint16(ncancel), 0, msg.Seq)
+		return repl
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fuqtest.GoPanicOnError(ctx, client.runConversationLoop)
+
+	msg, err := client.SendHello(ctx, proto.HelloData{
+		NumProcs: 8,
+		Running:  nil,
+	})
+
+	if err != nil {
+		t.Fatalf("error in HELLO: %v", err)
+	}
+
+	np, nr := msg.AsOkay()
+	if np != 8 || nr != 0 {
+		t.Fatalf("expected OK(8|0), but received OK(%d|%d)", nproc, nrun)
+	}
+
+	tasks := <-taskCh
+	// JOB message received
+	if len(tasks) != 6 {
+		t.Fatalf("expected 8 task, but received %d tasks", len(tasks))
+	}
+
+	/** Cancel job **/
+	env := ClientRequestEnvelope{
+		Auth: fuq.Client{Password: testingPass, Client: "testing"},
+		Msg: fuq.ClientStateChangeReq{
+			JobIds: []fuq.JobId{jobs[0].JobId},
+			Action: "cancel",
+		},
+	}
+
+	repl := []fuq.JobStateChangeResponse{}
+
+	roundTrip{
+		T:      t,
+		Msg:    env,
+		Dst:    &repl,
+		Target: "/" + ClientJobStatePath,
+	}.ExpectOK(mux.ServeHTTP)
+	t.Logf("response is %v", repl)
+
+	expectedRepl := []fuq.JobStateChangeResponse{
+		{jobs[0].JobId, fuq.Running, fuq.Cancelled},
+	}
+
+	if !reflect.DeepEqual(repl, expectedRepl) {
+		t.Fatalf("expected response '%v' but found '%v'",
+			expectedRepl, repl)
+	}
+
+	/** Receive CANCEL message **/
+	msg = <-msgCh
+	// expect CANCEL message
+
+	expected := proto.Message{
+		Type: proto.MTypeCancel,
+		Seq:  msg.Seq,
+		Data: []fuq.TaskPair{{jobs[0].JobId, -1}},
+	}
+
+	if !reflect.DeepEqual(msg, expected) {
+		t.Fatalf("expected '%v', but found '%v'", expected, msg)
+	}
+}

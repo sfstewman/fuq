@@ -679,6 +679,24 @@ func (s *Server) HandleClientJobState(resp http.ResponseWriter, req *http.Reques
 		}
 	}
 
+	if newState == fuq.Cancelled {
+		cancelPairs := make([]fuq.TaskPair, len(stateChange.JobIds))
+		for i, jobId := range stateChange.JobIds {
+			cancelPairs[i] = fuq.TaskPair{jobId, -1}
+		}
+
+		ctx := req.Context()
+
+		s.Foreman.connections.EachConn(func(pc *persistentConn) error {
+			select {
+			case pc.Canceled <- cancelPairs:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+	}
+
 	ret := make([]fuq.JobStateChangeResponse, len(stateChange.JobIds))
 	for i, jobId := range stateChange.JobIds {
 		prevState, err = s.ChangeJobState(jobId, newState)
