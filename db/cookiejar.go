@@ -100,32 +100,49 @@ func uniquifyName(names *bolt.Bucket, name string) (string, error) {
 	return "", nil
 }
 
-func (cj *CookieJar) generateCookie(tx *bolt.Tx, ni fuq.NodeInfo) (fuq.Cookie, error) {
-	cookies := cj.cookiesBucket(tx)
+func (cj *CookieJar) SessionKey() (string, error) {
+	sess, err := cj.makeCookie()
+	return string(sess), err
+}
+
+func (cj *CookieJar) makeCookie() (fuq.Cookie, error) {
 	raw := make([]byte, CookieSeqNumBytes)
 	hashed := make([]byte, base64.RawStdEncoding.EncodedLen(len(raw)))
 
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("error generating cookie: %v", err)
+	}
+
+	base64.RawStdEncoding.Encode(hashed, raw)
+	return fuq.Cookie(hashed), nil
+}
+
+func (cj *CookieJar) generateCookie(tx *bolt.Tx, ni fuq.NodeInfo) (fuq.Cookie, error) {
+	cookies := cj.cookiesBucket(tx)
+	var cookie fuq.Cookie
+
 	for {
-		if _, err := rand.Read(raw[:]); err != nil {
+		var err error
+
+		cookie, err = cj.makeCookie()
+		if err != nil {
 			return "", fmt.Errorf("error generating cookie: %v", err)
 		}
 
-		base64.RawStdEncoding.Encode(hashed, raw)
-		log.Printf("node %s: raw is %v, cookie is %s", ni.Node, raw, hashed)
+		log.Printf("node %s: cookie is %s", ni.Node, cookie)
 
-		if exists := cookies.Get(hashed); exists == nil {
+		if exists := cookies.Get([]byte(cookie)); exists == nil {
 			break
 		}
-		log.Printf("retrying")
+		log.Printf("cookie exists, retrying")
 	}
 
-	cookie := fuq.Cookie(hashed)
 	b, err := msgpack.Marshal(&ni)
 	if err != nil {
 		return "", err
 	}
 
-	if err := cookies.Put(hashed, b); err != nil {
+	if err := cookies.Put([]byte(cookie), b); err != nil {
 		return "", err
 	}
 

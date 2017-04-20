@@ -152,7 +152,8 @@ type AuthChecker interface {
 type Server struct {
 	*Foreman
 	fuq.CookieMaker
-	Auth AuthChecker
+	Auth    AuthChecker
+	Session string
 }
 
 type ServerOpts struct {
@@ -168,11 +169,18 @@ func NewServer(opts ServerOpts) (*Server, error) {
 		return nil, err
 	}
 
-	return &Server{
+	s := &Server{
 		Foreman:     f,
 		CookieMaker: opts.CookieMaker,
 		Auth:        opts.Auth,
-	}, nil
+	}
+
+	s.Session, err = s.CookieMaker.SessionKey()
+	if err != nil {
+		return nil, err
+	}
+
+	return s, nil
 }
 
 func (s *Server) CheckAuth(cred string) bool {
@@ -204,9 +212,23 @@ func (s *Server) HandleHello(resp http.ResponseWriter, req *http.Request) {
 
 	/* check authentication */
 	if !s.CheckAuth(hello.Auth) {
-		log.Printf("invalid authentication from request %v", req)
+		log.Printf("%s: invalid authentication from request", req.RemoteAddr)
 		fuq.Forbidden(resp, req)
 		return
+	}
+
+	initialSession := hello.NodeInfo.Session
+	log.Printf("srv.Server(%p): initial session key for node %s is %s",
+		s, hello.NodeInfo.Node, initialSession)
+
+	if initialSession != "" && initialSession != s.Session {
+		log.Printf("%s: invalid session", req.RemoteAddr)
+		fuq.Unauthorized(resp, req)
+		return
+	}
+
+	if initialSession == "" {
+		hello.NodeInfo.Session = s.Session
 	}
 
 	log.Printf("--> Making a cookie for %s with info %v\n",
@@ -222,9 +244,10 @@ func (s *Server) HandleHello(resp http.ResponseWriter, req *http.Request) {
 
 	ni, _ := s.Lookup(cookie)
 	ret := struct {
-		Name   string
-		Cookie fuq.Cookie
-	}{ni.UniqName, cookie}
+		Name    string
+		Session string
+		Cookie  fuq.Cookie
+	}{ni.UniqName, s.Session, cookie}
 	enc := json.NewEncoder(resp)
 	enc.Encode(&ret)
 }
@@ -264,6 +287,11 @@ func (s *Server) HandleNodeReauth(resp http.ResponseWriter, req *http.Request) {
 			hello.NodeInfo.Node, hello.NodeInfo.UniqName,
 			ni.Node, ni.UniqName)
 		fuq.Forbidden(resp, req)
+		return
+
+	case s.Session != hello.NodeInfo.Session:
+		log.Printf("%s: invalid session", req.RemoteAddr)
+		fuq.Unauthorized(resp, req)
 		return
 	}
 

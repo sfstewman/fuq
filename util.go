@@ -53,6 +53,12 @@ func Forbidden(resp http.ResponseWriter, req *http.Request) {
 		http.StatusForbidden)
 }
 
+func Unauthorized(resp http.ResponseWriter, req *http.Request) {
+	http.Error(resp,
+		fmt.Sprintf("%d access not authorized", http.StatusUnauthorized),
+		http.StatusUnauthorized)
+}
+
 func InternalError(resp http.ResponseWriter, req *http.Request) {
 	resp.WriteHeader(http.StatusInternalServerError)
 	fmt.Fprintf(resp, "%d internal error\n",

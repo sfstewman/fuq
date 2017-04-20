@@ -13,6 +13,7 @@ type Client struct {
 type NodeInfo struct {
 	Node     string   `json:"node"`
 	Pid      int      `json:"pid"`
+	Session  string   `json:"session"`
 	UniqName string   `json:"unique_name,omitempty"`
 	Tags     []string `json:"tags,omitempty"`
 	NumProc  int      `json:"nproc"`

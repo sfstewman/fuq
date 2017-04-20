@@ -22,8 +22,15 @@ type ClientRequestEnvelope struct {
 }
 
 type HelloResponseEnv struct {
-	Name   *string     `json:"name"`
-	Cookie *fuq.Cookie `json:"cookie"`
+	Name    *string     `json:"name"`
+	Session *string     `json:"session"`
+	Cookie  *fuq.Cookie `json:"cookie"`
+}
+
+func (env HelloResponseEnv) UpdateInfo(ni fuq.NodeInfo) fuq.NodeInfo {
+	ni.UniqName = *env.Name
+	ni.Session = *env.Session
+	return ni
 }
 
 func RespondWithJSON(resp http.ResponseWriter, mesg interface{}) error {

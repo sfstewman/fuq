@@ -7,6 +7,7 @@ import (
 
 type CookieMaker interface {
 	IsUniqueName(n string) (bool, error)
+	SessionKey() (string, error)
 	MakeCookie(ni NodeInfo) (Cookie, error)
 	RenewCookie(ni NodeInfo) (Cookie, error)
 	ExpireCookie(c Cookie) error

@@ -75,6 +75,12 @@ func RandomText(r *rand.Rand, txt []byte) {
 	}
 }
 
+func (jar *simpleCookieJar) SessionKey() (string, error) {
+	var session [8]byte
+	RandomText(nil, session[:])
+	return string(session[:]), nil
+}
+
 func (jar *simpleCookieJar) uniquifyName(ni fuq.NodeInfo) string {
 	/* assumes that the lock is held by the caller */
 	n := ni.UniqName
@@ -479,15 +485,20 @@ func TestServerHelloSuccess(t *testing.T) {
 	env := HelloResponseEnv{}
 	resp := sendHello(t, s, hello, &env)
 
-	if env.Name == nil || env.Cookie == nil {
+	if env.Name == nil || env.Session == nil || env.Cookie == nil {
 		t.Fatalf("response is incomplete: %#v", env)
 	}
 
-	ni.UniqName = *env.Name
+	ni = env.UpdateInfo(ni)
 	cookie := *env.Cookie
 
 	checkCookieInfo(t, s, cookie, ni)
 	checkWebCookie(t, cookie, resp)
+
+	if ni.Session != s.Session {
+		t.Fatalf("server returned the wrong session key: expected \"%s\", but received \"%s\"",
+			s.Session, ni.Session)
+	}
 }
 
 func TestServerHelloBadRequest(t *testing.T) {
@@ -528,6 +539,36 @@ func TestServerHelloBadPass(t *testing.T) {
 	checkNoCookies(t, resp)
 }
 
+func TestServerHelloStaleSession(t *testing.T) {
+	s := newTestingServer()
+
+	ni := makeNodeInfo()
+	// give it fake ("stale") session data:
+	ni.Session = "FooBarBaz"
+
+	// in case we get *really* unlucky
+	if ni.Session == s.Session {
+		ni.Session = "BazBarFoo"
+	}
+
+	hello := fuq.Hello{
+		Auth:     testingPass,
+		NodeInfo: ni,
+	}
+
+	// test bad password: should return Forbidden result
+	resp := roundTrip{
+		T:      t,
+		Msg:    &hello,
+		Dst:    nil,
+		Target: "/hello",
+	}.ExpectCode(s.HandleHello, http.StatusUnauthorized)
+	defer resp.Body.Close()
+
+	// make sure we have no cookies attached to the response
+	checkNoCookies(t, resp)
+}
+
 func TestServerNodeReauthSuccess(t *testing.T) {
 	s := newTestingServer()
 	ni := makeNodeInfo()
@@ -535,10 +576,11 @@ func TestServerNodeReauthSuccess(t *testing.T) {
 		Auth:     testingPass,
 		NodeInfo: ni,
 	}
+
 	env := HelloResponseEnv{}
 	sendHello(t, s, hello, &env)
 
-	ni.UniqName = *env.Name
+	ni = env.UpdateInfo(ni)
 	cookie := *env.Cookie
 
 	hello.NodeInfo = ni
@@ -627,6 +669,37 @@ func TestServerNodeReauthBadCookie(t *testing.T) {
 		Msg:    &reqEnv,
 		Target: "/node/reauth",
 	}.ExpectCode(s.HandleNodeReauth, http.StatusForbidden)
+	defer resp.Body.Close()
+
+	// make sure we have no cookies attached to the response
+	checkNoCookies(t, resp)
+}
+
+func TestServerNodeReauthStaleSession(t *testing.T) {
+	s := newTestingServer()
+	ni, cookie, _ := serverAuth(t, s)
+
+	// give it fake ("stale") session data:
+	ni.Session = "FooBarBaz"
+
+	// in case we get *really* unlucky
+	if ni.Session == s.Session {
+		ni.Session = "BazBarFoo"
+	}
+
+	reqEnv := NodeRequestEnvelope{
+		Cookie: cookie,
+		Msg: &fuq.Hello{
+			Auth:     testingPass,
+			NodeInfo: ni,
+		},
+	}
+
+	resp := roundTrip{
+		T:      t,
+		Msg:    &reqEnv,
+		Target: "/node/reauth",
+	}.ExpectCode(s.HandleNodeReauth, http.StatusUnauthorized)
 	defer resp.Body.Close()
 
 	// make sure we have no cookies attached to the response
@@ -818,7 +891,7 @@ func serverAuthWithInfo(t *testing.T, s *Server, ni fuq.NodeInfo) (fuq.NodeInfo,
 	env := HelloResponseEnv{}
 	resp := sendHello(t, s, hello, &env)
 
-	ni.UniqName = *env.Name
+	ni = env.UpdateInfo(ni)
 	cookie := *env.Cookie
 
 	return ni, cookie, resp
@@ -2924,5 +2997,23 @@ func TestCancelJobSomeWorkersOccupied(t *testing.T) {
 
 	if !reflect.DeepEqual(msg, expected) {
 		t.Fatalf("expected '%v', but found '%v'", expected, msg)
+	}
+}
+
+func TestServerHasUniqueSession(t *testing.T) {
+	s1 := newTestingServer()
+	s2 := newTestingServer()
+
+	// Simple tests
+	if s1.Session == "" {
+		t.Fatal("s1 has an empty session key")
+	}
+
+	if s2.Session == "" {
+		t.Fatal("s2 has an empty session key")
+	}
+
+	if s1.Session == s2.Session {
+		t.Fatal("s1 and s2 have the *same* session key")
 	}
 }
