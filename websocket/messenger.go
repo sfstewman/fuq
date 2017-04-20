@@ -151,23 +151,17 @@ func (ws *Messenger) doclose() error {
 		return nil
 	}
 
-	err := ws.C.Close()
+	code := websocket.CloseGoingAway
+	text := "Closing now"
+
+	data := websocket.FormatCloseMessage(code, text)
+	err := ws.C.WriteMessage(websocket.CloseMessage, data)
 	if err != nil {
 		return err
 	}
 
-	pingTest := []byte("ping test")
-	err = ws.C.WriteMessage(websocket.PingMessage, pingTest)
-	if err == nil {
-		panic("no error when writing after close")
-	}
-
-	closeErr, ok := err.(*websocket.CloseError)
-	if !ok {
-		panic(fmt.Sprintf("error is not a close error: %#v", err))
-	}
-
-	ws.closed.err = closeErr
+	ws.closed.err = &websocket.CloseError{code, text}
+	ws.C.Close()
 
 	return nil
 }
@@ -182,6 +176,10 @@ func (ws *Messenger) CloseNow() error {
 func (ws *Messenger) CloseWithMessage(code int, text string) error {
 	ws.closed.Lock()
 	defer ws.closed.Unlock()
+
+	if ws.closed.err != nil {
+		return nil
+	}
 
 	data := websocket.FormatCloseMessage(code, text)
 	err := ws.C.WriteMessage(websocket.CloseMessage, data)
