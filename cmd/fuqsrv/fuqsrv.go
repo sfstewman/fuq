@@ -17,7 +17,6 @@ import (
 	"github.com/sfstewman/fuq/node"
 	"github.com/sfstewman/fuq/srv"
 	"github.com/sfstewman/fuq/websocket"
-	"io/ioutil"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
@@ -108,10 +107,10 @@ func startDispatcher(wcfg *srv.NodeConfig, nproc int, config fuq.Config) error {
 		return fmt.Errorf("error obtaining cookies: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	mainCtx, mainCancel := context.WithCancel(context.Background())
+	defer mainCancel()
 
-	workerCtx := node.WorkerContext(ctx)
+	workerCtx := node.WorkerContext(mainCtx)
 
 	//
 	origUniqName := wcfg.NodeInfo.UniqName
@@ -129,25 +128,6 @@ func startDispatcher(wcfg *srv.NodeConfig, nproc int, config fuq.Config) error {
 		return fmt.Errorf("error configuring TLS: %v", err)
 	}
 
-	messenger, resp, err := websocket.DialWithTLS(url, ep.Client.Jar, tlsCfg)
-	if err != nil {
-		log.Printf("error connecting: %v", err)
-		log.Printf("response is: %#v", resp)
-		body, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			log.Printf("error reading response body: %v", err)
-		} else {
-			log.Printf("response body: %s", body)
-		}
-		return fmt.Errorf("error connecting: %v", err)
-	}
-
-	messenger.Timeout = 5 * time.Minute
-	defer messenger.CloseNow()
-
-	// XXX - handle any errors you encounter here!
-	go messenger.Heartbeat(ctx, "w2f_"+origUniqName)
-
 	logPath := filepath.Join(logDir,
 		fmt.Sprintf("%s.log", uniqName))
 
@@ -157,16 +137,53 @@ func startDispatcher(wcfg *srv.NodeConfig, nproc int, config fuq.Config) error {
 	//
 
 	logger := log.New(logFile, "w:"+uniqName, log.LstdFlags)
+
+	autodial := &websocket.Autodial{
+		Timeout:   5 * time.Minute,
+		URL:       url,
+		Jar:       ep.Client.Jar,
+		TLSConfig: tlsCfg,
+		HBName:    origUniqName,
+	}
+
+	defer autodial.Close()
+
+	/*
+		messenger, resp, err := websocket.DialWithTLS(url, ep.Client.Jar, tlsCfg)
+		if err != nil {
+			log.Printf("error connecting: %v", err)
+			log.Printf("response is: %#v", resp)
+			body, err := ioutil.ReadAll(resp.Body)
+			if err != nil {
+				log.Printf("error reading response body: %v", err)
+			} else {
+				log.Printf("response body: %s", body)
+			}
+			return fmt.Errorf("error connecting: %v", err)
+		}
+	*/
+
+	/*
+		// XXX - handle any errors you encounter here!
+		// go messenger.Heartbeat(ctx, "w2f_"+origUniqName)
+	*/
+
 	dispatcher := node.NewDispatch(node.DispatchConfig{
 		DefaultLogDir: logDir,
 		Logger:        logger,
-		Messenger:     messenger,
+		Messenger:     autodial,
 	})
 
 	var defaultRunner node.Runner = nil
+	log.Printf("%s starting %d workers", origUniqName, nproc)
 	dispatcher.StartWorkers(workerCtx, nproc, defaultRunner)
 
-	return dispatcher.QueueLoop(ctx)
+	err = dispatcher.QueueLoop(mainCtx)
+	if err != nil {
+		log.Printf("Node %s error: %v", wcfg.NodeInfo.UniqName, err)
+	}
+
+	return err
 }
 
 func main() {

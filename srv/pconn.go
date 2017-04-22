@@ -66,9 +66,19 @@ func (pc *persistentConn) onHello(msg proto.Message) proto.Message {
 	pc.nrun = uint16(len(hello.Running))
 	pc.ready = nil
 
-	close(pc.helloSignal)
+	log.Printf("srv.PConn(%p): received HELLO(%d|%d)",
+		pc, pc.nproc, pc.nrun)
+	log.Printf("srv.PConn(%p): running tasks = %v",
+		pc, hello.Running)
 
-	return proto.OkayMessage(pc.nproc, pc.nrun, msg.Seq)
+	repl := proto.OkayMessage(pc.nproc, pc.nrun, msg.Seq)
+	helloSignal := pc.helloSignal
+	repl.After(func() {
+		log.Printf("Sent reply to HELLO: %#v", repl)
+		close(helloSignal)
+	})
+
+	return repl
 }
 
 // for uint16 overflow detection

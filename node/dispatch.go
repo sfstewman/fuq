@@ -569,6 +569,7 @@ func (d *Dispatch) QueueLoop(ctx context.Context) error {
 	errCh := make(chan error)
 
 	go func() {
+		defer close(errCh)
 		if err := d.M.ConversationLoop(ctx); err != nil {
 			errCh <- err
 		}
@@ -591,7 +592,11 @@ func (d *Dispatch) QueueLoop(ctx context.Context) error {
 		// Check for: job update, cancellation
 		select {
 		case err := <-errCh:
-			log.Printf("error in conversation loop: %v", err)
+			if err != nil {
+				log.Printf("node.Dispatch(%p): error in conversation loop: %v", d, err)
+			} else {
+				log.Printf("node.Dispatch(%p): conversation loop ended", d)
+			}
 			return err
 
 		case upd := <-updCh:

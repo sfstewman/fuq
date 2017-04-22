@@ -112,10 +112,15 @@ func NewMessenger(conn *websocket.Conn, timeout time.Duration) *Messenger {
 	return messenger
 }
 
-func (ws *Messenger) closeHandler(code int, text string) error {
+func (ws *Messenger) setClosed(closedErr *websocket.CloseError) {
 	ws.closed.Lock()
 	defer ws.closed.Unlock()
-	ws.closed.err = &websocket.CloseError{code, text}
+	ws.closed.err = closedErr
+}
+
+func (ws *Messenger) closeHandler(code int, text string) error {
+	closedErr := &websocket.CloseError{code, text}
+	ws.setClosed(closedErr)
 	return nil
 }
 
@@ -170,6 +175,8 @@ func (ws *Messenger) CloseNow() error {
 	ws.closed.Lock()
 	defer ws.closed.Unlock()
 
+	log.Printf("websocket.Messenger(%p): CloseNow()", ws)
+
 	return ws.doclose()
 }
 
@@ -180,6 +187,9 @@ func (ws *Messenger) CloseWithMessage(code int, text string) error {
 	if ws.closed.err != nil {
 		return nil
 	}
+
+	log.Printf("websocket.Messenger(%p): CloseWithMessage(code=%d,text=\"%s\")",
+		ws, code, text)
 
 	data := websocket.FormatCloseMessage(code, text)
 	err := ws.C.WriteMessage(websocket.CloseMessage, data)
@@ -208,6 +218,9 @@ func (ws *Messenger) sendPing(ctx context.Context, tag string, count uint) error
 func (ws *Messenger) Heartbeat(ctx context.Context, tag string) error {
 	var pingCount uint
 
+	log.Printf("websocket.Messenger(%p): starting heartbeat",
+		ws)
+
 	timeout := ws.Timeout
 	hbInterval := timeout / 5
 
@@ -230,6 +243,8 @@ func (ws *Messenger) Heartbeat(ctx context.Context, tag string) error {
 	for {
 		select {
 		case <-ctx.Done():
+			log.Printf("websocket.Messenger(%p): heartbeat canceled",
+				ws)
 			return nil
 		case <-ticker.C:
 			pingCount++
@@ -256,7 +271,8 @@ func (ws *Messenger) Send(msg proto.Message) error {
 			return proto.ErrClosed
 		}
 
-		if _, ok := err.(*websocket.CloseError); ok {
+		if closedErr, ok := err.(*websocket.CloseError); ok {
+			ws.setClosed(closedErr)
 			return proto.ErrClosed
 		}
 		return err
@@ -281,9 +297,10 @@ func (ws *Messenger) Receive() (proto.Message, error) {
 
 	mt, r, err := ws.C.NextReader()
 	if err != nil {
-		log.Printf("websocket.Messenger(%p): error = %v", ws, err)
-		if _, ok := err.(*websocket.CloseError); ok {
+		log.Printf("websocket.Messenger(%p): error = %#v", ws, err)
+		if closedErr, ok := err.(*websocket.CloseError); ok {
 			log.Printf("websocket.Messenger(%p): closed", ws)
+			ws.setClosed(closedErr)
 			return proto.Message{}, proto.ErrClosed
 		}
 		return proto.Message{}, err
