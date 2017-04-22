@@ -24,6 +24,8 @@ type persistentConn struct {
 	helloSignal chan struct{}
 	stopSignal  chan struct{}
 
+	receivedHello bool
+
 	// canceled channel
 	Canceled chan []fuq.TaskPair
 
@@ -65,6 +67,7 @@ func (pc *persistentConn) onHello(msg proto.Message) proto.Message {
 	pc.nproc = uint16(hello.NumProcs)
 	pc.nrun = uint16(len(hello.Running))
 	pc.ready = nil
+	pc.receivedHello = true
 
 	log.Printf("srv.PConn(%p): received HELLO(%d|%d)",
 		pc, pc.nproc, pc.nrun)
@@ -84,7 +87,7 @@ func (pc *persistentConn) onHello(msg proto.Message) proto.Message {
 // for uint16 overflow detection
 const MaxUint16 uint16 = ^uint16(0)
 
-func (pc *persistentConn) onUpdate(msg proto.Message) proto.Message {
+func (pc *persistentConn) onUpdate(msg proto.Message) (reply proto.Message) {
 	log.Printf("received UPDATE %v", msg)
 
 	pc.mu.Lock()
@@ -97,23 +100,32 @@ func (pc *persistentConn) onUpdate(msg proto.Message) proto.Message {
 			upd, err)
 	}
 
-	// check for overflow/underflow
-	switch {
-	case pc.nproc == MaxUint16:
-		panic(fmt.Sprintf("nproc will overflow (currently %d)", pc.nproc))
-	case pc.nrun == 0:
-		panic(fmt.Sprintf("nrun will underflow (currently %d)", pc.nrun))
-	}
+	if pc.receivedHello {
+		// check for overflow/underflow
+		switch {
+		case pc.nproc == MaxUint16:
+			panic(fmt.Sprintf("nproc will overflow (currently %d)", pc.nproc))
+		case pc.nrun == 0:
+			panic(fmt.Sprintf("nrun will underflow (currently %d)", pc.nrun))
+		}
 
-	// TODO - jobs that occupy more than one core
-	if pc.nstop > 0 {
-		pc.nstop--
+		// TODO - jobs that occupy more than one core
+		if pc.nstop > 0 {
+			pc.nstop--
+		} else {
+			pc.nproc++
+		}
+		pc.nrun--
+
+		log.Printf("onUpdate: nproc=%d, nrun=%d, nstop=%d", pc.nproc, pc.nrun, pc.nstop)
+
+		reply = proto.OkayMessage(pc.nproc, pc.nrun, msg.Seq)
 	} else {
-		pc.nproc++
-	}
-	pc.nrun--
+		log.Printf("onUpdate: have not yet received HELLO")
 
-	log.Printf("onUpdate: nproc=%d, nrun=%d, nstop=%d", pc.nproc, pc.nrun, pc.nstop)
+		reply = proto.OkayMessage(^uint16(0), ^uint16(0), msg.Seq)
+	}
+
 	log.Printf("pconn(%p): UPDATE received", pc)
 	if pc.ready != nil {
 		log.Printf("pconn(%p): signaling READY", pc)
@@ -121,9 +133,7 @@ func (pc *persistentConn) onUpdate(msg proto.Message) proto.Message {
 		pc.ready = nil
 	}
 
-	reply := proto.OkayMessage(pc.nproc, pc.nrun, msg.Seq)
-
-	if pc.nproc == 0 && pc.nrun == 0 {
+	if pc.receivedHello && pc.nproc == 0 && pc.nrun == 0 {
 		reply.After(func() {
 			close(pc.stopSignal)
 		})

@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/sfstewman/fuq"
 	"github.com/sfstewman/fuq/proto"
@@ -47,6 +48,8 @@ func (cq channelQueuer) UpdateAndRequestAction(ctx context.Context, status fuq.J
 		return StopAction{All: false}, nil
 	}
 }
+
+var errSendHello = errors.New("foreman requested HELLO")
 
 type DispatchConfig struct {
 	DefaultLogDir string
@@ -516,18 +519,23 @@ func (d *Dispatch) recordJobFinished(upd fuq.JobStatusUpdate) error {
 }
 
 func (d *Dispatch) sendUpdate(ctx context.Context, upd fuq.JobStatusUpdate) error {
-	err := d.recordJobFinished(upd)
-	if err != nil {
-		return err
-	}
-
 	resp, err := d.M.SendUpdate(ctx, upd)
 	if err != nil {
 		return err
 	}
 
+	if err := d.recordJobFinished(upd); err != nil {
+		return err
+	}
+
 	if resp.Type != proto.MTypeOK {
 		return fmt.Errorf("expected OK response, but received: %v", resp)
+	}
+
+	np, nr := resp.AsOkay()
+	if np == ^uint16(0) && nr == ^uint16(0) {
+		log.Printf("node.Dispatch(%p): Foreman requested HELLO", d)
+		return errSendHello
 	}
 
 	return nil
@@ -557,14 +565,15 @@ func (d *Dispatch) sendHello(ctx context.Context) error {
 func (d *Dispatch) QueueLoop(ctx context.Context) error {
 	stopSignal := make(chan struct{})
 
+	// BEGIN CRITICAL REGION
 	d.mu.Lock()
 	if d.signals.stop != nil {
 		d.mu.Unlock()
 		panic("queue loop already started")
 	}
-
 	d.signals.stop = stopSignal
 	d.mu.Unlock()
+	// END CRITICAL REGION
 
 	errCh := make(chan error)
 
@@ -575,11 +584,16 @@ func (d *Dispatch) QueueLoop(ctx context.Context) error {
 		}
 	}()
 
-	if err := d.sendHello(ctx); err != nil {
-		return err
-	}
+	sendHello := true
 
 	for {
+		if sendHello {
+			sendHello = false
+			if err := d.sendHello(ctx); err != nil {
+				return err
+			}
+		}
+
 		updCh := d.Queuer.updCh
 		np, nr, ns, wsig := d.runningState()
 		log.Printf("node.Dispatch(%p): np=%d, nr=%d, ns=%d", d, np, nr, ns)
@@ -602,7 +616,15 @@ func (d *Dispatch) QueueLoop(ctx context.Context) error {
 		case upd := <-updCh:
 			log.Printf("node.Dispatch(%p): UPDATE for job %d, task %d (status=%s)",
 				d, upd.JobId, upd.Task, upd.Status)
-			if err := d.sendUpdate(ctx, upd); err != nil {
+
+			err := d.sendUpdate(ctx, upd)
+			switch err {
+			case nil:
+				/* nop */
+			case errSendHello:
+				sendHello = true
+
+			default: /* err != nil */
 				log.Printf("node.Dispatch(%p): error sending update for job %d, task %d (status=%s): %v",
 					d, upd.JobId, upd.Task, upd.Status, err)
 			}
