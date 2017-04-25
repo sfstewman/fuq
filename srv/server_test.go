@@ -472,32 +472,92 @@ func checkWebCookie(t *testing.T, cookie fuq.Cookie, resp *http.Response) {
 	t.Fatalf("could not find Foreman cookie named '%s'", ServerCookie)
 }
 
-func TestServerHelloSuccess(t *testing.T) {
-	s := newTestingServer()
+type authTestCase struct {
+	Name string
+	Pass string
 
-	ni := makeNodeInfo()
-	hello := fuq.Hello{
-		Auth:     testingPass,
-		NodeInfo: ni,
-	}
+	Node     *string
+	UniqName *string
+	Cookie   *string
+	Session  *string
 
-	/* test success case */
-	env := HelloResponseEnv{}
-	resp := sendHello(t, s, hello, &env)
+	ExpectedCode int
+}
 
-	if env.Name == nil || env.Session == nil || env.Cookie == nil {
-		t.Fatalf("response is incomplete: %#v", env)
-	}
+var helloTests = []authTestCase{
+	{
+		Name:         "Success",
+		Pass:         testingPass,
+		ExpectedCode: http.StatusOK,
+	},
+	{
+		Name:         "BadPass",
+		Pass:         invalidPass,
+		ExpectedCode: http.StatusForbidden,
+	},
+	{
+		Name:         "StaleSession",
+		Session:      strptr("FooBarBaz"),
+		ExpectedCode: http.StatusUnauthorized,
+	},
+}
 
-	ni = env.UpdateInfo(ni)
-	cookie := *env.Cookie
+func strptr(s string) *string { return &s }
 
-	checkCookieInfo(t, s, cookie, ni)
-	checkWebCookie(t, cookie, resp)
+func TestServerHelloTests(t *testing.T) {
+	for _, test := range helloTests {
+		t.Run(test.Name, func(t *testing.T) {
+			s := newTestingServer()
+			ni := makeNodeInfo()
 
-	if ni.Session != s.Session {
-		t.Fatalf("server returned the wrong session key: expected \"%s\", but received \"%s\"",
-			s.Session, ni.Session)
+			if test.Session != nil {
+				ni.Session = *test.Session
+			}
+
+			hello := fuq.Hello{
+				Auth:     test.Pass,
+				NodeInfo: ni,
+			}
+
+			env := HelloResponseEnv{}
+			if test.ExpectedCode != http.StatusOK {
+				resp := roundTrip{
+					T:      t,
+					Msg:    &hello,
+					Dst:    nil,
+					Target: "/hello",
+				}.ExpectCode(s.HandleHello, http.StatusForbidden)
+				defer resp.Body.Close()
+
+				t.Logf("received expected code %d", test.ExpectedCode)
+
+				// make sure we have no cookies attached to the response
+				checkNoCookies(t, resp)
+				return
+			}
+
+			resp := sendHello(t, s, hello, &env)
+
+			t.Logf("received expected code %d", test.ExpectedCode)
+			t.Logf("request: %#v", hello)
+			t.Logf("result:  %#v", resp)
+
+			if env.Name == nil || env.Session == nil || env.Cookie == nil {
+				t.Fatalf("response is incomplete: %#v", env)
+			}
+
+			ni = env.UpdateInfo(ni)
+			cookie := *env.Cookie
+
+			checkCookieInfo(t, s, cookie, ni)
+			checkWebCookie(t, cookie, resp)
+
+			if ni.Session != s.Session {
+				t.Fatalf("server returned the wrong session key: expected \"%s\", but received \"%s\"",
+					s.Session, ni.Session)
+			}
+
+		})
 	}
 }
 
@@ -517,93 +577,117 @@ func TestServerHelloBadRequest(t *testing.T) {
 	checkNoCookies(t, resp)
 }
 
-func TestServerHelloBadPass(t *testing.T) {
-	s := newTestingServer()
-
-	ni := makeNodeInfo()
-	hello := fuq.Hello{
-		Auth:     invalidPass,
-		NodeInfo: ni,
-	}
-
-	// test bad password: should return Forbidden result
-	resp := roundTrip{
-		T:      t,
-		Msg:    &hello,
-		Dst:    nil,
-		Target: "/hello",
-	}.ExpectCode(s.HandleHello, http.StatusForbidden)
-	defer resp.Body.Close()
-
-	// make sure we have no cookies attached to the response
-	checkNoCookies(t, resp)
+var reauthTests = []authTestCase{
+	{
+		Name:         "Success",
+		Pass:         testingPass,
+		ExpectedCode: http.StatusOK,
+	},
+	{
+		Name:         "EmptyCookie",
+		Pass:         testingPass,
+		Cookie:       strptr(""),
+		ExpectedCode: http.StatusForbidden,
+	},
+	{
+		Name:         "BadCookie",
+		Pass:         testingPass,
+		Cookie:       strptr("!@#$F"),
+		ExpectedCode: http.StatusForbidden,
+	},
+	{
+		Name:         "StaleSession",
+		Pass:         testingPass,
+		Session:      strptr("bad_session_ident"),
+		ExpectedCode: http.StatusUnauthorized,
+	},
+	{
+		Name:         "BadPassword",
+		Pass:         invalidPass,
+		ExpectedCode: http.StatusForbidden,
+	},
+	{
+		Name:         "InvalidNode",
+		Node:         strptr("robocop"),
+		ExpectedCode: http.StatusForbidden,
+	},
+	{
+		Name:         "InvalidUniqName",
+		UniqName:     strptr("robocop:1"),
+		ExpectedCode: http.StatusForbidden,
+	},
 }
 
-func TestServerHelloStaleSession(t *testing.T) {
-	s := newTestingServer()
+func TestServerNodeReauthTests(t *testing.T) {
+	for _, test := range reauthTests {
+		t.Run(test.Name, func(t *testing.T) {
+			s := newTestingServer()
+			ni := makeNodeInfo()
+			hello := fuq.Hello{
+				Auth:     testingPass,
+				NodeInfo: ni,
+			}
 
-	ni := makeNodeInfo()
-	// give it fake ("stale") session data:
-	ni.Session = "FooBarBaz"
+			env := HelloResponseEnv{}
+			sendHello(t, s, hello, &env)
 
-	// in case we get *really* unlucky
-	if ni.Session == s.Session {
-		ni.Session = "BazBarFoo"
+			ni = env.UpdateInfo(ni)
+			cookie := *env.Cookie
+
+			hello.Auth = test.Pass
+			hello.NodeInfo = ni
+
+			if test.Node != nil {
+				hello.NodeInfo.Node = *test.Node
+			}
+
+			if test.UniqName != nil {
+				hello.NodeInfo.UniqName = *test.UniqName
+			}
+
+			if test.Session != nil {
+				hello.NodeInfo.Session = *test.Session
+			}
+
+			if test.Cookie != nil {
+				cookie = fuq.Cookie(*test.Cookie)
+			}
+
+			reqEnv := NodeRequestEnvelope{
+				Cookie: cookie,
+				Msg:    &hello,
+			}
+
+			ret := HelloResponseEnv{}
+			rt := roundTrip{
+				T:      t,
+				Msg:    &reqEnv,
+				Dst:    &ret,
+				Target: "/node/reauth",
+			}
+
+			if test.ExpectedCode != http.StatusOK {
+				resp := rt.ExpectCode(s.HandleNodeReauth, test.ExpectedCode)
+				checkNoCookies(t, resp)
+				return
+			}
+
+			// StatusOK
+			resp := rt.ExpectOK(s.HandleNodeReauth)
+
+			t.Logf("received expected code %d", test.ExpectedCode)
+			t.Logf("request envelope: %#v", reqEnv)
+			t.Logf("returned result:  %#v", ret)
+
+			if ret.Name == nil || ret.Cookie == nil {
+				t.Fatalf("reauth response is incomplete: %#v", ret)
+			}
+
+			newCookie := *ret.Cookie
+			checkCookieInfo(t, s, newCookie, ni)
+			checkWebCookie(t, newCookie, resp)
+		})
 	}
-
-	hello := fuq.Hello{
-		Auth:     testingPass,
-		NodeInfo: ni,
-	}
-
-	// test bad password: should return Forbidden result
-	resp := roundTrip{
-		T:      t,
-		Msg:    &hello,
-		Dst:    nil,
-		Target: "/hello",
-	}.ExpectCode(s.HandleHello, http.StatusUnauthorized)
-	defer resp.Body.Close()
-
-	// make sure we have no cookies attached to the response
-	checkNoCookies(t, resp)
-}
-
-func TestServerNodeReauthSuccess(t *testing.T) {
-	s := newTestingServer()
-	ni := makeNodeInfo()
-	hello := fuq.Hello{
-		Auth:     testingPass,
-		NodeInfo: ni,
-	}
-
-	env := HelloResponseEnv{}
-	sendHello(t, s, hello, &env)
-
-	ni = env.UpdateInfo(ni)
-	cookie := *env.Cookie
-
-	hello.NodeInfo = ni
-	reqEnv := NodeRequestEnvelope{
-		Cookie: cookie,
-		Msg:    &hello,
-	}
-
-	ret := HelloResponseEnv{}
-	resp := roundTrip{
-		T:      t,
-		Msg:    &reqEnv,
-		Dst:    &ret,
-		Target: "/node/reauth",
-	}.ExpectOK(s.HandleNodeReauth)
-
-	if ret.Name == nil || ret.Cookie == nil {
-		t.Fatalf("reauth response is incomplete: %#v", env)
-	}
-
-	newCookie := *ret.Cookie
-	checkCookieInfo(t, s, newCookie, ni)
-	checkWebCookie(t, newCookie, resp)
 }
 
 func TestServerNodeReauthBadRequest(t *testing.T) {
@@ -618,161 +702,6 @@ func TestServerNodeReauthBadRequest(t *testing.T) {
 		Msg:    &reqEnv,
 		Target: "/node/reauth",
 	}.ExpectCode(s.HandleNodeReauth, http.StatusBadRequest)
-	defer resp.Body.Close()
-
-	// make sure we have no cookies attached to the response
-	checkNoCookies(t, resp)
-}
-
-func TestServerNodeReauthEmptyCookie(t *testing.T) {
-	s := newTestingServer()
-	ni, _, _ := serverAuth(t, s)
-
-	reqEnv := NodeRequestEnvelope{
-		// no Cookie field: make sure empty cookie fails
-		Msg: &fuq.Hello{
-			Auth:     testingPass,
-			NodeInfo: ni,
-		},
-	}
-
-	resp := roundTrip{
-		T:      t,
-		Msg:    &reqEnv,
-		Target: "/node/reauth",
-	}.ExpectCode(s.HandleNodeReauth, http.StatusForbidden)
-	defer resp.Body.Close()
-
-	// make sure we have no cookies attached to the response
-	checkNoCookies(t, resp)
-}
-
-func TestServerNodeReauthBadCookie(t *testing.T) {
-	s := newTestingServer()
-	ni, cookie, _ := serverAuth(t, s)
-
-	badCookie := "AAAAAAA"
-	for string(cookie) == badCookie {
-		badCookie = badCookie + "_1"
-	}
-
-	reqEnv := NodeRequestEnvelope{
-		Cookie: fuq.Cookie(badCookie),
-		Msg: &fuq.Hello{
-			Auth:     testingPass,
-			NodeInfo: ni,
-		},
-	}
-
-	resp := roundTrip{
-		T:      t,
-		Msg:    &reqEnv,
-		Target: "/node/reauth",
-	}.ExpectCode(s.HandleNodeReauth, http.StatusForbidden)
-	defer resp.Body.Close()
-
-	// make sure we have no cookies attached to the response
-	checkNoCookies(t, resp)
-}
-
-func TestServerNodeReauthStaleSession(t *testing.T) {
-	s := newTestingServer()
-	ni, cookie, _ := serverAuth(t, s)
-
-	// give it fake ("stale") session data:
-	ni.Session = "FooBarBaz"
-
-	// in case we get *really* unlucky
-	if ni.Session == s.Session {
-		ni.Session = "BazBarFoo"
-	}
-
-	reqEnv := NodeRequestEnvelope{
-		Cookie: cookie,
-		Msg: &fuq.Hello{
-			Auth:     testingPass,
-			NodeInfo: ni,
-		},
-	}
-
-	resp := roundTrip{
-		T:      t,
-		Msg:    &reqEnv,
-		Target: "/node/reauth",
-	}.ExpectCode(s.HandleNodeReauth, http.StatusUnauthorized)
-	defer resp.Body.Close()
-
-	// make sure we have no cookies attached to the response
-	checkNoCookies(t, resp)
-}
-
-func TestServerNodeReauthBadPassword(t *testing.T) {
-	s := newTestingServer()
-	ni, cookie, _ := serverAuth(t, s)
-
-	reqEnv := NodeRequestEnvelope{
-		Cookie: fuq.Cookie(cookie),
-		Msg: &fuq.Hello{
-			Auth:     invalidPass,
-			NodeInfo: ni,
-		},
-	}
-
-	resp := roundTrip{
-		T:      t,
-		Msg:    &reqEnv,
-		Target: "/node/reauth",
-	}.ExpectCode(s.HandleNodeReauth, http.StatusForbidden)
-	defer resp.Body.Close()
-
-	// make sure we have no cookies attached to the response
-	checkNoCookies(t, resp)
-}
-
-func TestServerNodeReauthInvalidNode(t *testing.T) {
-	s := newTestingServer()
-	ni, cookie, _ := serverAuth(t, s)
-
-	badNodeInfo := ni
-	badNodeInfo.Node = "robocop"
-	reqEnv := NodeRequestEnvelope{
-		Cookie: fuq.Cookie(cookie),
-		Msg: &fuq.Hello{
-			Auth:     testingPass,
-			NodeInfo: badNodeInfo,
-		},
-	}
-
-	resp := roundTrip{
-		T:      t,
-		Msg:    &reqEnv,
-		Target: "/node/reauth",
-	}.ExpectCode(s.HandleNodeReauth, http.StatusForbidden)
-	defer resp.Body.Close()
-
-	// make sure we have no cookies attached to the response
-	checkNoCookies(t, resp)
-}
-
-func TestServerNodeReauthInvalidUniqName(t *testing.T) {
-	s := newTestingServer()
-	ni, cookie, _ := serverAuth(t, s)
-
-	badNodeInfo := ni
-	badNodeInfo.UniqName = "robocop:1"
-	reqEnv := NodeRequestEnvelope{
-		Cookie: fuq.Cookie(cookie),
-		Msg: &fuq.Hello{
-			Auth:     testingPass,
-			NodeInfo: badNodeInfo,
-		},
-	}
-
-	resp := roundTrip{
-		T:      t,
-		Msg:    &reqEnv,
-		Target: "/node/reauth",
-	}.ExpectCode(s.HandleNodeReauth, http.StatusForbidden)
 	defer resp.Body.Close()
 
 	// make sure we have no cookies attached to the response
@@ -796,63 +725,59 @@ func newCookieTest(t *testing.T) (http.Handler, *http.Cookie) {
 	return handler, cookies[0]
 }
 
-func TestRequireValidCookieSuccess(t *testing.T) {
-	handler, cookie := newCookieTest(t)
-
-	req := httptest.NewRequest("GET", "/", nil)
-	req.AddCookie(cookie)
-	wr := httptest.NewRecorder()
-
-	handler.ServeHTTP(wr, req)
-	resp := wr.Result()
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("response was '%s', not OK", resp.Status)
-	}
+type validCookieTest struct {
+	Name         string
+	NoCookie     bool
+	BadCookie    bool
+	ExpectedCode int
 }
 
-func TestRequireValidCookieMissingCookie(t *testing.T) {
-	handler, _ := newCookieTest(t)
-
-	req := httptest.NewRequest("GET", "/", nil)
-	// don't add cookie
-	wr := httptest.NewRecorder()
-
-	handler.ServeHTTP(wr, req)
-	resp := wr.Result()
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("response was '%s', not Unauthorized", resp.Status)
-	}
+var validCookieTests = []validCookieTest{
+	{
+		Name:         "Success",
+		ExpectedCode: http.StatusOK,
+	},
+	{
+		Name:         "MissingCookie",
+		NoCookie:     true,
+		ExpectedCode: http.StatusUnauthorized,
+	},
+	{
+		Name:         "InvalidCookie",
+		BadCookie:    true,
+		ExpectedCode: http.StatusUnauthorized,
+	},
 }
 
-func TestRequireValidCookieInvalidCookie(t *testing.T) {
-	var badCookie *http.Cookie
+func TestRequireValidCookie(t *testing.T) {
+	for _, test := range validCookieTests {
+		t.Run(test.Name, func(t *testing.T) {
+			handler, cookie := newCookieTest(t)
+			req := httptest.NewRequest("GET", "/", nil)
 
-	handler, goodCookie := newCookieTest(t)
+			if test.BadCookie {
+				t.Logf("good cookie = %s", cookie)
+				_, cookie = newCookieTest(t)
+				t.Logf("bad cookie = %s", cookie)
+			}
 
-	// construct a bad cookie by auth'ing to a new server, then
-	for {
-		_, badCookie = newCookieTest(t)
-		if badCookie.Value != goodCookie.Value {
-			break
-		}
-	}
-	t.Logf("good cookie = %s", goodCookie)
-	t.Logf("bad cookie = %s", badCookie)
+			if !test.NoCookie {
+				req.AddCookie(cookie)
+			}
 
-	req := httptest.NewRequest("GET", "/", nil)
-	req.AddCookie(badCookie)
-	wr := httptest.NewRecorder()
+			wr := httptest.NewRecorder()
+			handler.ServeHTTP(wr, req)
 
-	handler.ServeHTTP(wr, req)
-	resp := wr.Result()
-	defer resp.Body.Close()
+			resp := wr.Result()
+			defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("response was '%s', not Unauthorized", resp.Status)
+			if resp.StatusCode != test.ExpectedCode {
+				t.Fatalf("response was '%s', not OK", resp.Status)
+			}
+
+			/***/ // TestRequireValidCookieInvalidCookie
+
+		})
 	}
 }
 
@@ -2369,117 +2294,106 @@ func (sjh *simpleJobHandler) TaskCh() <-chan []fuq.Task {
 	return sjh.taskCh
 }
 
-func TestServerPConnClosedWhileJobsRunning(t *testing.T) {
-	s := newTestingServer()
-
-	wsConn, client := newTestClient(t, s)
-	defer wsConn.Close()
-	// defer client.Close()
-
-	queue := s.JobQueuer.(*simpleQueuer)
-	id, err := queue.AddJob(fuq.JobDescription{
-		Name:       "job1",
-		NumTasks:   8,
-		WorkingDir: "/foo/bar",
-		LoggingDir: "/foo/bar/logs",
-		Command:    "/foo/foo_it.sh",
-	})
-
-	_, _ = id, err
-
-	sjh := newSimpleJobHandler(t, 7)
-	taskCh := sjh.TaskCh()
-	client.OnMessageFunc(proto.MTypeJob, sjh.onJob)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go client.ConversationLoop(ctx)
-
-	// XXX
-	pconnHello(t, ctx, client, 7)
-
-	// make sure we're in the connection set...
-	var ourPc *persistentConn
-	err = s.connections.EachConn(func(pc *persistentConn) error {
-		if pc.NodeInfo.UniqName == client.NodeInfo.UniqName {
-			ourPc = pc
-		}
-
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("error looking for persistent connection: %v", err)
-	}
-
-	if ourPc == nil {
-		t.Fatal("could not find persistent connection")
-	}
-
-	// The foreman should dispatch nproc tasks
-	tasks := <-taskCh
-	if len(tasks) != 7 {
-		t.Fatalf("expected 7 tasks to be queued")
-	}
-
-	np, nr := sjh.Stats()
-	if np != 0 && nr != 7 {
-		t.Fatalf("expected nproc=%d and nrun=%d, but found nproc=%d and nrun=%d",
-			0, 7, np, nr)
-	}
-
-	// abruptly close connection!
-	client.Messenger.Close()
-
-	// wait for request to finish...
-	<-client.ServerFinished
-
-	if s.connections.HasConn(ourPc) {
-		t.Errorf("after close, should not have connection set")
-	}
+type pconnCloseTest struct {
+	Name    string
+	NumProc int
+	Jobs    []fuq.JobDescription
 }
 
-func TestServerPConnClosedWhileWaitingForJobs(t *testing.T) {
-	s := newTestingServer()
+var pconnCloseTests = []pconnCloseTest{
+	{
+		Name:    "WhileJobsRunning",
+		NumProc: 7,
+		Jobs: []fuq.JobDescription{
+			{
+				Name:       "job1",
+				NumTasks:   8,
+				WorkingDir: "/foo/bar",
+				LoggingDir: "/foo/bar/logs",
+				Command:    "/foo/foo_it.sh",
+			},
+		},
+	},
+	{
+		Name:    "WhileWaitingForJobs",
+		NumProc: 7,
+		Jobs:    nil,
+	},
+}
 
-	wsConn, client := newTestClient(t, s)
-	defer wsConn.Close()
+func TestServerPConnClosedTests(t *testing.T) {
+	for _, test := range pconnCloseTests {
+		t.Run(test.Name, func(t *testing.T) {
+			s := newTestingServer()
 
-	sjh := newSimpleJobHandler(t, 7)
-	client.OnMessageFunc(proto.MTypeJob, sjh.onJob)
+			wsConn, client := newTestClient(t, s)
+			defer wsConn.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go client.ConversationLoop(ctx)
+			sjh := newSimpleJobHandler(t, test.NumProc)
+			client.OnMessageFunc(proto.MTypeJob, sjh.onJob)
 
-	// XXX
-	pconnHello(t, ctx, client, 7)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go client.ConversationLoop(ctx)
 
-	// make sure we're in the connection set...
-	var ourPc *persistentConn
-	err := s.connections.EachConn(func(pc *persistentConn) error {
-		if pc.NodeInfo.UniqName == client.NodeInfo.UniqName {
-			ourPc = pc
-		}
+			queue := s.JobQueuer.(*simpleQueuer)
+			for i, job := range test.Jobs {
+				id, err := queue.AddJob(job)
+				if err != nil {
+					t.Fatalf("error queuing job %d: %v", i, job)
+				}
+				test.Jobs[i].JobId = id
+			}
 
-		return nil
-	})
+			taskCh := sjh.TaskCh()
 
-	if err != nil {
-		t.Fatalf("error looking for persistent connection: %v", err)
-	}
+			// XXX
+			pconnHello(t, ctx, client, test.NumProc)
 
-	if ourPc == nil {
-		t.Fatal("could not find persistent connection")
-	}
+			// make sure we're in the connection set...
+			var ourPc *persistentConn
+			err := s.connections.EachConn(func(pc *persistentConn) error {
+				if pc.NodeInfo.UniqName == client.NodeInfo.UniqName {
+					ourPc = pc
+				}
 
-	// abruptly close connection!
-	client.Messenger.Close()
+				return nil
+			})
 
-	// wait for request to finish...
-	<-client.ServerFinished
+			if err != nil {
+				t.Fatalf("error looking for persistent connection: %v", err)
+			}
 
-	if s.connections.HasConn(ourPc) {
-		t.Errorf("after close, should not have connection set")
+			if ourPc == nil {
+				t.Fatal("could not find persistent connection")
+			}
+
+			if len(test.Jobs) > 0 {
+				// The foreman should dispatch nproc tasks
+				tasks := <-taskCh
+				if len(tasks) != test.NumProc {
+					t.Fatalf("expected %d tasks to be queued, but found %d",
+						test.NumProc, len(tasks))
+				}
+
+				np, nr := sjh.Stats()
+				if np != 0 && nr != test.NumProc {
+					t.Fatalf("expected nproc=%d and nrun=%d, but found nproc=%d and nrun=%d",
+						0, test.NumProc, np, nr)
+				}
+			}
+
+			// abruptly close connection!
+			client.Messenger.Close()
+
+			// wait for request to finish...
+			<-client.ServerFinished
+
+			if s.connections.HasConn(ourPc) {
+				t.Errorf("after close, should not have connection set")
+			}
+
+		})
 	}
 }
 
