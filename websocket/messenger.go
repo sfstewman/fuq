@@ -223,6 +223,7 @@ func (ws *Messenger) Heartbeat(ctx context.Context, tag string) error {
 	ws.C.SetPongHandler(func(data string) error {
 		count := atomic.AddUint32(&pongCount, 1)
 		log.Printf("PONG: %s %d", data, count)
+		ws.extendWriteDeadline(true)
 
 		return nil
 	})
@@ -257,9 +258,11 @@ func (ws *Messenger) Heartbeat(ctx context.Context, tag string) error {
 	}
 }
 
-func (ws *Messenger) Send(msg proto.Message) (err error) {
-	ws.closed.Lock()
-	defer ws.closed.Unlock()
+func (ws *Messenger) extendWriteDeadline(lock bool) {
+	if lock {
+		ws.closed.Lock()
+		defer ws.closed.Unlock()
+	}
 
 	dt := ws.Timeout
 	if dt > 0 {
@@ -268,9 +271,16 @@ func (ws *Messenger) Send(msg proto.Message) (err error) {
 	} else {
 		ws.C.SetWriteDeadline(time.Time{})
 	}
+}
+
+func (ws *Messenger) Send(msg proto.Message) (err error) {
+	ws.closed.Lock()
+	defer ws.closed.Unlock()
+
+	ws.extendWriteDeadline(false)
 
 	log.Printf("websocket.Messenger(%p): Send(%v) with timeout %f seconds",
-		ws, msg, dt.Seconds())
+		ws, msg, ws.Timeout.Seconds())
 
 	wr, err := ws.C.NextWriter(websocket.BinaryMessage)
 	if err != nil {
