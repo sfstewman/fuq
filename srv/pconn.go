@@ -161,6 +161,12 @@ func (pc *persistentConn) numProcAvail() (int, chan struct{}) {
 	return 0, ready
 }
 
+func (pc *persistentConn) ReceivedHello() bool {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	return pc.receivedHello
+}
+
 /*
 waitOnWorkers:
 	select {
@@ -212,10 +218,10 @@ Loop():
 
 func (pc *persistentConn) sendStop(ctx context.Context) error {
 	pc.mu.Lock()
-	defer pc.mu.Unlock()
-
 	nstop := uint32(pc.nproc) + uint32(pc.nrun)
+	pc.mu.Unlock()
 
+	// don't hold lock during SendStop
 	resp, err := pc.C.SendStop(ctx, nstop)
 	if err != nil {
 		return err
@@ -226,6 +232,9 @@ func (pc *persistentConn) sendStop(ctx context.Context) error {
 	}
 
 	np, nr := resp.AsOkay()
+
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
 
 	// XXX - check for overflow
 	nleft := uint32(np) + uint32(nr)
@@ -240,9 +249,6 @@ func (pc *persistentConn) sendStop(ctx context.Context) error {
 }
 
 func (pc *persistentConn) sendJobs(ctx context.Context, tasks []fuq.Task) error {
-	// pc.mu.Lock()
-	// defer pc.mu.Unlock()
-
 	log.Printf("SENDING %d jobs", len(tasks))
 
 	pc.mu.Lock()

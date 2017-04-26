@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -200,7 +201,10 @@ func (ws *Messenger) sendPing(ctx context.Context, tag string, count uint) error
 }
 
 func (ws *Messenger) Heartbeat(ctx context.Context, tag string) error {
-	var pingCount uint
+	var (
+		pingCount uint32
+		pongCount uint32
+	)
 
 	log.Printf("websocket.Messenger(%p): starting heartbeat",
 		ws)
@@ -217,7 +221,9 @@ func (ws *Messenger) Heartbeat(ctx context.Context, tag string) error {
 	}
 
 	ws.C.SetPongHandler(func(data string) error {
-		log.Printf("PONG: %s", data)
+		count := atomic.AddUint32(&pongCount, 1)
+		log.Printf("PONG: %s %d", data, count)
+
 		return nil
 	})
 
@@ -231,11 +237,27 @@ func (ws *Messenger) Heartbeat(ctx context.Context, tag string) error {
 				ws)
 			return nil
 		case <-ticker.C:
-			pingCount++
-			if err := ws.sendPing(ctx, tag, pingCount); err != nil {
+			count := atomic.AddUint32(&pingCount, 1)
+			check := atomic.LoadUint32(&pongCount)
+
+			// handle overflow
+			delta := count - check
+			if check > count {
+				tmp := ^(count ^ count)
+				delta = count + (tmp - check) + 1
+			}
+
+			if delta > 1 {
+				log.Printf("Mismatch in PING/PONG count: %d, %d.  Closing.",
+					count, check)
+				ws.CloseNow()
+				return fmt.Errorf("mismatch in ping/pong count")
+			}
+
+			if err := ws.sendPing(ctx, tag, uint(count)); err != nil {
 				return err
 			}
-			log.Printf("PING %d", pingCount)
+			log.Printf("PING %d", count)
 		}
 	}
 }

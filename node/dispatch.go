@@ -562,12 +562,14 @@ func (d *Dispatch) sendUpdate(ctx context.Context, upd fuq.JobStatusUpdate) erro
 
 func (d *Dispatch) sendHello(ctx context.Context) (chan struct{}, error) {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-
 	nproc, nrun := d.numProcs()
+	tasks := make([]fuq.Task, len(d.tasks))
+	copy(tasks, d.tasks)
+	d.mu.Unlock()
+
 	resp, err := d.M.SendHello(ctx, proto.HelloData{
 		NumProcs: nproc,
-		Running:  d.tasks,
+		Running:  tasks,
 	})
 
 	if err != nil {
@@ -577,6 +579,9 @@ func (d *Dispatch) sendHello(ctx context.Context) (chan struct{}, error) {
 	if err := checkOK(resp, uint16(nproc), uint16(nrun)); err != nil {
 		return nil, fmt.Errorf("error in HELLO reply: %v", err)
 	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
 
 	signal := make(chan struct{})
 	d.signals.resendHello = signal
