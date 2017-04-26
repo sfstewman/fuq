@@ -470,6 +470,7 @@ func (s *Server) HandleNodePersistent(resp http.ResponseWriter, req *http.Reques
 			req.RemoteAddr, err)
 		return
 	}
+	log.Printf("%s: upgraded, messenger is %#v ", req.RemoteAddr, messenger)
 
 	defer func() {
 		if !messenger.IsClosed() {
@@ -707,6 +708,22 @@ func (s *Server) HandleClientJobState(resp http.ResponseWriter, req *http.Reques
 		}
 	}
 
+	ret := make([]fuq.JobStateChangeResponse, len(stateChange.JobIds))
+	for i, jobId := range stateChange.JobIds {
+		prevState, err = s.ChangeJobState(jobId, newState)
+		if err != nil {
+			log.Printf("error changing the job state to %s: %v", stateChange.Action, err)
+			fuq.InternalError(resp, req)
+			return
+		}
+
+		ret[i] = fuq.JobStateChangeResponse{
+			JobId:      jobId,
+			PrevStatus: prevState,
+			NewStatus:  newState,
+		}
+	}
+
 	if newState == fuq.Cancelled {
 		cancelPairs := make([]fuq.TaskPair, len(stateChange.JobIds))
 		for i, jobId := range stateChange.JobIds {
@@ -723,22 +740,6 @@ func (s *Server) HandleClientJobState(resp http.ResponseWriter, req *http.Reques
 				return ctx.Err()
 			}
 		})
-	}
-
-	ret := make([]fuq.JobStateChangeResponse, len(stateChange.JobIds))
-	for i, jobId := range stateChange.JobIds {
-		prevState, err = s.ChangeJobState(jobId, newState)
-		if err != nil {
-			log.Printf("error changing the job state to %s: %v", stateChange.Action, err)
-			fuq.InternalError(resp, req)
-			return
-		}
-
-		ret[i] = fuq.JobStateChangeResponse{
-			JobId:      jobId,
-			PrevStatus: prevState,
-			NewStatus:  newState,
-		}
 	}
 
 	RespondWithJSON(resp, &ret)
