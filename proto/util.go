@@ -16,5 +16,5 @@ write:
 		goto write
 	}
 
-	return
+	return n, err
 }
