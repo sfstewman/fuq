@@ -12,6 +12,16 @@ import (
 	"time"
 )
 
+type ConnectObserver interface {
+	Connected(*Autodial, *Messenger)
+}
+
+type OnConnectFunc func(*Autodial, *Messenger)
+
+func (f OnConnectFunc) Connected(ad *Autodial, m *Messenger) {
+	f(ad, m)
+}
+
 type Autodial struct {
 	mu sync.Mutex
 
@@ -22,16 +32,23 @@ type Autodial struct {
 	Jar       http.CookieJar
 	TLSConfig *tls.Config
 
-	HBName   string
+	MaxConnAttempts int
+	MaxSendAttempts int
+	MinWait         time.Duration
+	MaxWait         time.Duration
+
+	HBName    string
+	OnConnect ConnectObserver
+
 	hbCancel func()
 }
 
 const (
-	MaxConnAttempts = 100
-	MaxSendAttempts = 5
+	DefaultConnAttempts = 100
+	DefaultSendAttempts = 5
 
-	MinWait = 1 * time.Second
-	MaxWait = 5 * time.Minute
+	DefaultMinWait = 1 * time.Second
+	DefaultMaxWait = 5 * time.Minute
 )
 
 var ErrMaxAttempts = errors.New("too many failed attempts to connect")
@@ -44,12 +61,26 @@ func (ad *Autodial) tryConnect() (*Messenger, error) {
 		m    *Messenger
 		resp *http.Response
 		err  error
-		wait = MinWait
 	)
+
+	maxConnAttempts := ad.MaxConnAttempts
+	if maxConnAttempts == 0 {
+		maxConnAttempts = DefaultConnAttempts
+	}
+
+	wait := ad.MinWait
+	if wait == 0 {
+		wait = DefaultMinWait
+	}
+
+	maxWait := ad.MinWait
+	if maxWait == 0 {
+		maxWait = DefaultMaxWait
+	}
 
 	m = ad.Messenger
 
-	for nattempts := 0; nattempts < MaxConnAttempts; nattempts++ {
+	for nattempts := 0; nattempts < maxConnAttempts; nattempts++ {
 		if m != nil && !m.IsClosed() {
 			log.Printf("websocket.Autodial(%p): m=%p, m.IsClosed() = %v",
 				ad, m, m.IsClosed())
@@ -73,6 +104,10 @@ func (ad *Autodial) tryConnect() (*Messenger, error) {
 			go m.Heartbeat(hbCtx, "w2f_"+ad.HBName)
 			ad.hbCancel = hbCancel
 
+			if ad.OnConnect != nil {
+				ad.OnConnect.Connected(ad, m)
+			}
+
 			return m, nil
 		}
 
@@ -87,14 +122,14 @@ func (ad *Autodial) tryConnect() (*Messenger, error) {
 		}
 
 		// retry if we haven't given up
-		log.Printf("websocket.Autodial(%p): waiting %d seconds",
+		log.Printf("websocket.Autodial(%p): waiting %8f seconds",
 			ad, int(wait.Seconds()))
 		<-time.After(wait)
 
-		if wait < MaxWait {
+		if wait < maxWait {
 			wait *= 2
-			if wait > MaxWait {
-				wait = MaxWait
+			if wait > maxWait {
+				wait = maxWait
 			}
 		}
 
@@ -104,7 +139,12 @@ func (ad *Autodial) tryConnect() (*Messenger, error) {
 }
 
 func (ad *Autodial) Send(msg proto.Message) error {
-	for nattempts := 0; nattempts < MaxSendAttempts; nattempts++ {
+	maxSendAttempts := ad.MaxSendAttempts
+	if maxSendAttempts == 0 {
+		maxSendAttempts = DefaultSendAttempts
+	}
+
+	for nattempts := 0; nattempts < maxSendAttempts; nattempts++ {
 		m, err := ad.tryConnect()
 		if err != nil {
 			// XXX - this or proto.ErrClosed ?
@@ -112,6 +152,7 @@ func (ad *Autodial) Send(msg proto.Message) error {
 		}
 
 		err = m.Send(msg)
+		log.Printf("websocket.Autodial(%p) send: err=%v", ad, err)
 
 		switch {
 		case err == nil:
@@ -124,7 +165,11 @@ func (ad *Autodial) Send(msg proto.Message) error {
 			continue
 
 		default:
-			return err
+			// socket is in a corrupted state, reconnect
+			log.Printf("autodialer reconnecting after error: %v", err)
+			m.CloseNow()
+
+			continue
 		}
 	}
 
@@ -132,7 +177,12 @@ func (ad *Autodial) Send(msg proto.Message) error {
 }
 
 func (ad *Autodial) Receive() (proto.Message, error) {
-	for nattempts := 0; nattempts < MaxSendAttempts; nattempts++ {
+	maxSendAttempts := ad.MaxSendAttempts
+	if maxSendAttempts == 0 {
+		maxSendAttempts = DefaultSendAttempts
+	}
+
+	for nattempts := 0; nattempts < maxSendAttempts; nattempts++ {
 		m, err := ad.tryConnect()
 		if err != nil {
 			// XXX - this or proto.ErrClosed ?

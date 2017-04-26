@@ -27,7 +27,7 @@ type Messenger struct {
 	Timeout time.Duration
 	closed  struct {
 		sync.Mutex
-		err *websocket.CloseError
+		err error
 	}
 }
 
@@ -112,38 +112,25 @@ func NewMessenger(conn *websocket.Conn, timeout time.Duration) *Messenger {
 	return messenger
 }
 
-func (ws *Messenger) setClosed(closedErr *websocket.CloseError) {
-	ws.closed.Lock()
-	defer ws.closed.Unlock()
-	ws.closed.err = closedErr
+func (ws *Messenger) setClosed(lock bool, err error) {
+	if lock {
+		ws.closed.Lock()
+		defer ws.closed.Unlock()
+	}
+	ws.closed.err = err
 }
 
 func (ws *Messenger) closeHandler(code int, text string) error {
 	closedErr := &websocket.CloseError{code, text}
-	ws.setClosed(closedErr)
+	ws.setClosed(true, closedErr)
 	return nil
 }
 
-func (ws *Messenger) closedInfo(l hasLock) (bool, int, string) {
-	if !l.locked {
-		ws.closed.Lock()
-		defer ws.closed.Unlock()
-	}
-
-	if ws.closed.err == nil {
-		return false, 0, ""
-	}
-
-	return true, ws.closed.err.Code, ws.closed.err.Text
-}
-
 func (ws *Messenger) IsClosed() bool {
-	closed, _, _ := ws.closedInfo(hasLock{false})
-	return closed
-}
+	ws.closed.Lock()
+	defer ws.closed.Unlock()
 
-func (ws *Messenger) ClosedInfo() (bool, int, string) {
-	return ws.closedInfo(hasLock{false})
+	return ws.closed.err != nil
 }
 
 func (ws *Messenger) Dial() error {
@@ -156,19 +143,15 @@ func (ws *Messenger) doclose() error {
 		return nil
 	}
 
+	defer ws.C.Close()
+
 	code := websocket.CloseGoingAway
 	text := "Closing now"
 
-	data := websocket.FormatCloseMessage(code, text)
-	err := ws.C.WriteMessage(websocket.CloseMessage, data)
-	if err != nil {
-		return err
-	}
-
 	ws.closed.err = &websocket.CloseError{code, text}
-	ws.C.Close()
+	data := websocket.FormatCloseMessage(code, text)
 
-	return nil
+	return ws.C.WriteMessage(websocket.CloseMessage, data)
 }
 
 func (ws *Messenger) CloseNow() error {
@@ -199,6 +182,7 @@ func (ws *Messenger) CloseWithMessage(code int, text string) error {
 
 	ws.closed.err = &websocket.CloseError{code, text}
 	ws.C.Close()
+	log.Printf("websocket.Messenger(%p): connection is closed", ws)
 
 	return nil
 }
@@ -256,38 +240,60 @@ func (ws *Messenger) Heartbeat(ctx context.Context, tag string) error {
 	}
 }
 
-func (ws *Messenger) Send(msg proto.Message) error {
+func (ws *Messenger) Send(msg proto.Message) (err error) {
 	ws.closed.Lock()
 	defer ws.closed.Unlock()
 
 	dt := ws.Timeout
-	t := time.Now()
+	if dt > 0 {
+		t := time.Now()
+		ws.C.SetWriteDeadline(t.Add(dt))
+	} else {
+		ws.C.SetWriteDeadline(time.Time{})
+	}
 
-	ws.C.SetWriteDeadline(t.Add(dt))
+	log.Printf("websocket.Messenger(%p): Send(%v) with timeout %f seconds",
+		ws, msg, dt.Seconds())
 
 	wr, err := ws.C.NextWriter(websocket.BinaryMessage)
 	if err != nil {
+		log.Printf("websocket.Messenger(%p): send error is %v", ws, err)
 		if err == websocket.ErrCloseSent {
 			return proto.ErrClosed
 		}
 
 		if closedErr, ok := err.(*websocket.CloseError); ok {
-			ws.setClosed(closedErr)
+			ws.setClosed(false, closedErr)
 			return proto.ErrClosed
 		}
+
+		ws.setClosed(false, err)
+
+		log.Printf("error (%T) sending message: %v", err, err)
 		return err
 	}
 
-	defer wr.Close()
+	defer func() {
+		errClose := wr.Close()
+		if err == nil {
+			err = errClose
+			log.Printf("error closing Send() writer: %v", err)
+		}
+	}()
 
 	if err := msg.Send(wr); err != nil {
+		log.Printf("websocket.Messenger(%p): send error is %v", ws, err)
 		if err == websocket.ErrCloseSent {
 			return proto.ErrClosed
 		}
 
+		fmt.Printf("websocket.Messenger(%p): error sending message: %v",
+			ws, err)
+
 		return err
 	}
 
+	log.Printf("websocket.Messenger(%p): send is okay", ws)
 	return nil
 }
 
@@ -297,10 +303,10 @@ func (ws *Messenger) Receive() (proto.Message, error) {
 
 	mt, r, err := ws.C.NextReader()
 	if err != nil {
-		log.Printf("websocket.Messenger(%p): error = %#v", ws, err)
+		// log.Printf("websocket.Messenger(%p): error = %#v", ws, err)
 		if closedErr, ok := err.(*websocket.CloseError); ok {
-			log.Printf("websocket.Messenger(%p): closed", ws)
-			ws.setClosed(closedErr)
+			// log.Printf("websocket.Messenger(%p): closed", ws)
+			ws.setClosed(true, closedErr)
 			return proto.Message{}, proto.ErrClosed
 		}
 		return proto.Message{}, err
