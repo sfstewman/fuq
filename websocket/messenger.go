@@ -236,17 +236,12 @@ func (ws *Messenger) Heartbeat(ctx context.Context, tag string) error {
 			log.Printf("websocket.Messenger(%p): heartbeat canceled",
 				ws)
 			return nil
+
 		case <-ticker.C:
 			count := atomic.AddUint32(&pingCount, 1)
 			check := atomic.LoadUint32(&pongCount)
 
-			// handle overflow
 			delta := count - check
-			if check > count {
-				tmp := ^(count ^ count)
-				delta = count + (tmp - check) + 1
-			}
-
 			if delta > 1 {
 				log.Printf("Mismatch in PING/PONG count: %d, %d.  Closing.",
 					count, check)
