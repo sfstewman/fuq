@@ -174,6 +174,11 @@ func startDispatcher(wcfg *srv.NodeConfig, nproc int, config fuq.Config) error {
 		Messenger:     autodial,
 	})
 
+	autodial.OnConnect = websocket.OnConnectFunc(
+		func(ad *websocket.Autodial, m *websocket.Messenger) {
+			dispatcher.ResendHello()
+		})
+
 	var defaultRunner node.Runner = nil
 	log.Printf("%s starting %d workers", origUniqName, nproc)
 	dispatcher.StartWorkers(workerCtx, nproc, defaultRunner)
