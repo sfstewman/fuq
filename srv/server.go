@@ -742,6 +742,8 @@ func (s *Server) HandleClientJobState(resp http.ResponseWriter, req *http.Reques
 		})
 	}
 
+	s.WakeupListeners()
+
 	RespondWithJSON(resp, &ret)
 }
 
