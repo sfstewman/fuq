@@ -124,8 +124,9 @@ func (dts *dispatcherTestState) startServer() (*proto.Conn, chan proto.Message, 
 
 		// this cheats, but we're not testing whether the
 		// foreman can keep track of this here
-		np, nr, _ := d.NumProcs()
-		return proto.OkayMessage(uint16(np), uint16(nr), m.Seq)
+		np, nr, ns := d.NumProcs()
+		log.Printf("UPDATE np=%d, nr=%d, ns=%d", np, nr, ns)
+		return proto.OkayMessage(uint16(np+1), uint16(nr-1), m.Seq)
 	})
 
 	dts.serverSignal = make(chan struct{})
@@ -238,6 +239,9 @@ func TestDispatcherJobs(t *testing.T) {
 	if !reflect.DeepEqual(runner.T, tasks) {
 		t.Errorf("runner.T should have a copy of the originally submitted tasks")
 	}
+
+	dts.dispatcher.Stop()
+	<-dts.dispatchSignal
 }
 
 func TestDispatcherStop(t *testing.T) {
@@ -285,6 +289,8 @@ type blockingRunner struct {
 	started chan int
 	ended   chan int
 
+	finishAll chan struct{}
+
 	wg sync.WaitGroup
 }
 
@@ -322,9 +328,14 @@ func (br *blockingRunner) finishTask(pair fuq.TaskPair) {
 	}
 }
 
+func (br *blockingRunner) FinishAll() {
+	close(br.finishAll)
+}
+
 func (br *blockingRunner) Run(ctx context.Context, t fuq.Task, w *Worker) (fuq.JobStatusUpdate, error) {
 	pair := fuq.TaskPair{JobId: t.JobId, Task: t.Task}
 	finish := br.addTask(pair)
+	finishAll := br.finishAll
 	defer br.delTask(pair)
 
 	br.wg.Add(1)
@@ -335,15 +346,20 @@ func (br *blockingRunner) Run(ctx context.Context, t fuq.Task, w *Worker) (fuq.J
 	case br.started <- t.Task:
 		/* nop */
 		br.T.Logf("Runner for task %d sent STARTED event", t.Task)
+	case <-finishAll:
+		/* nop */
 	case <-ctx.Done():
 		br.T.Logf("Runner for task %d received CANCEL event", t.Task)
 		return fuq.JobStatusUpdate{}, ctx.Err()
 	}
 
-	// block until the finish signal or the context is canceled
+	// block until a finish signal or the context is canceled
 	select {
 	case <-ctx.Done():
 	case <-finish:
+		br.T.Logf("Task %d received FINISH-ALL signal", t.Task)
+	case <-finishAll:
+		br.T.Logf("Task %d Received FINISH-ALL signal", t.Task)
 	}
 
 	// signal that we're ending
@@ -362,10 +378,11 @@ func (br *blockingRunner) Run(ctx context.Context, t fuq.Task, w *Worker) (fuq.J
 
 func newBlockingRunner(t *testing.T) *blockingRunner {
 	return &blockingRunner{
-		T:       t,
-		started: make(chan int),
-		ended:   make(chan int),
-		running: make(map[fuq.TaskPair]chan struct{}),
+		T:         t,
+		started:   make(chan int),
+		ended:     make(chan int),
+		running:   make(map[fuq.TaskPair]chan struct{}),
+		finishAll: make(chan struct{}),
 	}
 }
 
@@ -529,6 +546,10 @@ func TestDispatcherCancel(t *testing.T) {
 
 	// wait
 	runner.wg.Wait()
+
+	// stop dispatcher
+	dts.dispatcher.Stop()
+	<-dts.dispatchSignal
 }
 
 func TestDispatcherStopFinishesWhenJobsFinish(t *testing.T) {
@@ -692,5 +713,91 @@ func TestDispatcherStopImmed(t *testing.T) {
 		t.Fatalf("error sending tasks: %v", err)
 	}
 
+	<-dts.dispatchSignal
+}
+
+func TestDispatcherSendsHelloOnSignal(t *testing.T) {
+	runner := newBlockingRunner(t)
+
+	dts := newDispatcherTestState(2, runner)
+	defer dts.Close()
+
+	ctx := dts.ctx
+	server, msgCh, _ := dts.startServer()
+
+	hello := <-msgCh
+	hdata := hello.Data.(proto.HelloData)
+	if hdata.NumProcs != 2 {
+		t.Errorf("invalid HELLO: expected NumProcs = %d, found %d",
+			2, hdata.NumProcs)
+	}
+
+	if len(hdata.Running) != 0 {
+		t.Errorf("invalid HELLO: expected #Running = %d, found %d",
+			0, len(hdata.Running))
+	}
+
+	tasks := []fuq.Task{
+		fuq.Task{
+			Task: 1,
+			JobDescription: fuq.JobDescription{
+				JobId:      fuq.JobId(7),
+				Name:       "this_job",
+				NumTasks:   3,
+				WorkingDir: ".",
+				LoggingDir: ".",
+				Command:    "/bin/true", // XXX - make more portable!
+			},
+		},
+		fuq.Task{
+			Task: 2,
+			JobDescription: fuq.JobDescription{
+				JobId:      fuq.JobId(7),
+				Name:       "this_job",
+				NumTasks:   3,
+				WorkingDir: ".",
+				LoggingDir: ".",
+				Command:    "/bin/true", // XXX - make more portable!
+			},
+		},
+	}
+
+	resp, err := server.SendJob(ctx, tasks)
+	if err != nil {
+		t.Fatalf("error sending tasks: %v", err)
+	}
+
+	if expected := proto.OkayMessage(0, 2, resp.Seq); !reflect.DeepEqual(resp, expected) {
+		t.Fatalf("expected '%v' but found '%v'", expected, resp)
+	}
+
+	// make sure both jobs haved started
+	<-runner.started
+	<-runner.started
+
+	np, nr, ns := dts.dispatcher.NumProcs()
+	if np != 0 || nr != 2 || ns != 0 {
+		t.Fatalf("expected np=0, nr=2, ns=0, but found np=%d, nr=%d, ns=%d",
+			np, nr, ns)
+	}
+
+	dts.dispatcher.ResendHello()
+	hello2 := <-msgCh
+	hdata2 := hello2.Data.(proto.HelloData)
+	expectedHello := proto.HelloData{NumProcs: 0, Running: tasks}
+	if !reflect.DeepEqual(expectedHello, hdata2) {
+		t.Fatalf("expected HELLO to be '%#v'\nbut found '%#v'",
+			expectedHello, hdata2)
+	}
+
+	runner.FinishAll()
+	<-runner.ended
+	<-msgCh
+
+	<-runner.ended
+	<-msgCh
+
+	// Wait for server to end...
+	dts.dispatcher.Stop()
 	<-dts.dispatchSignal
 }

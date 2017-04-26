@@ -72,6 +72,7 @@ type Dispatch struct {
 	signals struct {
 		workerFinished chan struct{}
 		stop           chan struct{}
+		resendHello    chan struct{}
 	}
 
 	Logger        *log.Logger
@@ -127,6 +128,24 @@ func (d *Dispatch) runWorker(ctx context.Context, worker *Worker) {
 		copy(d.workers[ind:n-1], d.workers[ind+1:])
 		d.workers = d.workers[:n-1]
 	}
+}
+
+func (d *Dispatch) ResendHello() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	signal := d.signals.resendHello
+	d.signals.resendHello = nil
+	if signal != nil {
+		close(signal)
+	}
+}
+
+func (d *Dispatch) helloSignal() chan struct{} {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return d.signals.resendHello
 }
 
 func (d *Dispatch) signalWorkerFinished() {
@@ -541,7 +560,7 @@ func (d *Dispatch) sendUpdate(ctx context.Context, upd fuq.JobStatusUpdate) erro
 	return nil
 }
 
-func (d *Dispatch) sendHello(ctx context.Context) error {
+func (d *Dispatch) sendHello(ctx context.Context) (chan struct{}, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -552,14 +571,17 @@ func (d *Dispatch) sendHello(ctx context.Context) error {
 	})
 
 	if err != nil {
-		return fmt.Errorf("error during HELLO: %v", err)
+		return nil, fmt.Errorf("error during HELLO: %v", err)
 	}
 
 	if err := checkOK(resp, uint16(nproc), uint16(nrun)); err != nil {
-		return fmt.Errorf("error in HELLO reply: %v", err)
+		return nil, fmt.Errorf("error in HELLO reply: %v", err)
 	}
 
-	return nil
+	signal := make(chan struct{})
+	d.signals.resendHello = signal
+
+	return signal, nil
 }
 
 func (d *Dispatch) QueueLoop(ctx context.Context) error {
@@ -584,12 +606,13 @@ func (d *Dispatch) QueueLoop(ctx context.Context) error {
 		}
 	}()
 
-	sendHello := true
-
 	for {
-		if sendHello {
-			sendHello = false
-			if err := d.sendHello(ctx); err != nil {
+		helloSignal := d.helloSignal()
+		if helloSignal == nil {
+			// log.Printf("node.Dispatch(%p): sending HELLO", d)
+			var err error
+			helloSignal, err = d.sendHello(ctx)
+			if err != nil {
 				return err
 			}
 		}
@@ -622,7 +645,7 @@ func (d *Dispatch) QueueLoop(ctx context.Context) error {
 			case nil:
 				/* nop */
 			case errSendHello:
-				sendHello = true
+				d.ResendHello()
 
 			default: /* err != nil */
 				log.Printf("node.Dispatch(%p): error sending update for job %d, task %d (status=%s): %v",
@@ -632,6 +655,9 @@ func (d *Dispatch) QueueLoop(ctx context.Context) error {
 			if err := d.sendStopIfAnyToStop(); err != nil {
 				log.Printf("node.Dispatch(%p): error sending STOP: %v", d, err)
 			}
+
+		case <-helloSignal:
+			log.Printf("node.Dispatch(%p): need to resend HELLO", d)
 
 		case <-wsig:
 			log.Printf("node.Dispatch(%p): worker finished", d)
